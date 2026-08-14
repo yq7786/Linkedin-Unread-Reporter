@@ -1,7 +1,7 @@
 # LinkedIn Unread Reporter Design
 
 **Date:** 2026-08-14  
-**Status:** Approved conversational design; awaiting written-spec review  
+**Status:** Approved for implementation
 **Local target:** A user-selected clone directory; the path is never committed
 **Distribution:** Public GitHub-ready repository and repo-scoped Codex plugin marketplace
 
