@@ -136,10 +136,19 @@ export class PlaywrightLinkedInAdapter {
       throw new ScanInvariantError('conversation-list-not-uniquely-visible');
     }
     const rows = await visibleLists.first().locator(ROW_SELECTOR).evaluateAll((elements, options) => {
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      };
       const excluded = new Set(options.excludeIds);
       const results = [];
       let qualifyingCount = 0;
       for (const row of elements) {
+        if (!isVisible(row)) continue;
         const nameElement = row.querySelector([
           '[data-reporter-name]',
           '.msg-conversation-listitem__participant-names',
@@ -228,26 +237,32 @@ export class PlaywrightLinkedInAdapter {
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       };
       const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
-      const list = lists.length === 1 ? lists[0] : null;
-      if (!list) return null;
+      if (lists.length !== 1) return { listCount: lists.length };
+      const list = lists[0];
       return {
+        listCount: 1,
         rowCount: list.querySelectorAll(rowSelector).length,
         scrollHeight: list.scrollHeight,
         scrollTop: list.scrollTop,
       };
     }, { listSelector: LIST_SELECTOR, rowSelector: ROW_SELECTOR });
-    if (!before) return false;
+    if (before.listCount !== 1) {
+      throw new ScanInvariantError('conversation-list-not-uniquely-visible');
+    }
 
-    await this.page.evaluate(({ listSelector }) => {
+    const scrollTargetCount = await this.page.evaluate(({ listSelector }) => {
       const isVisible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       };
       const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
-      const list = lists.length === 1 ? lists[0] : null;
-      if (list) list.scrollTop = list.scrollHeight;
+      if (lists.length === 1) lists[0].scrollTop = lists[0].scrollHeight;
+      return lists.length;
     }, { listSelector: LIST_SELECTOR });
+    if (scrollTargetCount !== 1) {
+      throw new ScanInvariantError('conversation-list-not-uniquely-visible');
+    }
     await this.page.waitForTimeout(750);
 
     const after = await this.page.evaluate(({ listSelector, rowSelector }) => {
@@ -257,19 +272,23 @@ export class PlaywrightLinkedInAdapter {
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       };
       const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
-      const list = lists.length === 1 ? lists[0] : null;
-      if (!list) return null;
+      if (lists.length !== 1) return { listCount: lists.length };
+      const list = lists[0];
       return {
+        listCount: 1,
         rowCount: list.querySelectorAll(rowSelector).length,
         scrollHeight: list.scrollHeight,
         scrollTop: list.scrollTop,
       };
     }, { listSelector: LIST_SELECTOR, rowSelector: ROW_SELECTOR });
-    return Boolean(after && (
+    if (after.listCount !== 1) {
+      throw new ScanInvariantError('conversation-list-not-uniquely-visible');
+    }
+    return Boolean(
       after.rowCount !== before.rowCount
       || after.scrollHeight !== before.scrollHeight
       || after.scrollTop !== before.scrollTop
-    ));
+    );
   }
 
   async waitForStability() {

@@ -98,3 +98,42 @@ test('hidden stale inbox markup cannot satisfy visible invariants or supply rows
   assert.equal(state.conversationListCount, 1);
   assert.deepEqual((await adapter.readRows()).map(({ id }) => id), ['visible']);
 });
+
+test('hidden rows inside the visible inbox are not extracted', async (t) => {
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent(`
+    <button aria-pressed="true">Unread</button>
+    <ul class="msg-conversations-container__conversations-list">
+      <li id="hidden" class="msg-conversation-listitem" style="display:none">
+        <h3>Hidden stale name</h3><span aria-label="1 unread message"></span>
+      </li>
+      <li id="visible" class="msg-conversation-listitem">
+        <h3>Visible name</h3><span aria-label="1 unread message"></span>
+      </li>
+    </ul>
+  `);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+  assert.deepEqual((await adapter.readRows()).map(({ id }) => id), ['visible']);
+});
+
+test('scrolling fails closed if the visible inbox loses uniqueness', async (t) => {
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent(`
+    <ul class="msg-conversations-container__conversations-list">
+      <li id="visible" class="msg-conversation-listitem"><h3>Visible name</h3></li>
+    </ul>
+  `);
+  await page.evaluate(() => {
+    window.setTimeout(() => {
+      const duplicate = document.querySelector('ul').cloneNode(true);
+      duplicate.id = 'duplicate-list';
+      document.body.append(duplicate);
+    }, 50);
+  });
+  const adapter = new PlaywrightLinkedInAdapter(page);
+  await assert.rejects(adapter.scrollList(), ScanInvariantError);
+});
