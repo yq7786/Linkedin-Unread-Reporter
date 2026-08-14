@@ -8,8 +8,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test",
-    "check": "node --check src/*.js && node --test",
+    "test": "node test/run-tests.js",
+    "check": "node --check src/*.js && node test/run-tests.js",
     "configure": "node src/cli.js configure",
     "scan": "node src/cli.js scan",
     "slack-test": "node src/cli.js slack-test",

@@ -44,7 +44,7 @@ npm run report
 Share this GitHub repository with a teammate. In Codex, they can provide its URL and ask:
 
 ```text
-Use $skill-installer to install the repository root as the linkedin-unread-reporter skill.
+Use $skill-installer to install this GitHub repository with --path . --name linkedin-unread-reporter.
 ```
 
 The complete reporter is installed with the skill, so no separate application clone or plugin installation is required. On the next turn, ask: `Use $linkedin-unread-reporter to set it up.` Codex installs dependencies, requests the Slack webhook through a hidden local prompt, runs the supervised LinkedIn scan, verifies Slack delivery, and creates the three fixed schedules.

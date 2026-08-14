@@ -11,10 +11,19 @@ import { normalizeConversationRow, ScanInvariantError } from '../src/linkedin-st
 
 const fixtures = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
 
-test('Playwright adapter extracts only row metadata from the unread fixture', async (t) => {
-  const browser = await chromium.launch({ headless: true });
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+function browserTest(name, callback) {
+  test(name, async () => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await callback(page);
+    } finally {
+      await browser.close();
+    }
+  });
+}
+
+browserTest('Playwright adapter extracts only row metadata from the unread fixture', async (page) => {
   await page.setContent(await fs.readFile(path.join(fixtures, 'unread-list.html'), 'utf8'));
   const adapter = new PlaywrightLinkedInAdapter(page);
 
@@ -33,10 +42,7 @@ test('Playwright adapter extracts only row metadata from the unread fixture', as
   assert.equal(JSON.stringify(rows).includes('message preview'), false);
 });
 
-test('Playwright adapter detects an active nested conversation container', async (t) => {
-  const browser = await chromium.launch({ headless: true });
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+browserTest('Playwright adapter detects an active nested conversation container', async (page) => {
   await page.setContent(`
     <button aria-pressed="true">Unread</button>
     <ul aria-label="Conversation List" class="msg-conversations-container__conversations-list">
@@ -49,10 +55,7 @@ test('Playwright adapter detects an active nested conversation container', async
   assert.equal((await adapter.inspectState()).activeRowCount, 1);
 });
 
-test('an unread row without a stable identity fails closed', async (t) => {
-  const browser = await chromium.launch({ headless: true });
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+browserTest('an unread row without a stable identity fails closed', async (page) => {
   await page.setContent(`
     <li class="msg-conversation-listitem">
       <h3>Same Person</h3><p data-preview>Private first preview</p>
@@ -63,10 +66,7 @@ test('an unread row without a stable identity fails closed', async (t) => {
   await assert.rejects(adapter.readRows(), ScanInvariantError);
 });
 
-test('load-more control fails closed if it is nested in a conversation row', async (t) => {
-  const browser = await chromium.launch({ headless: true });
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+browserTest('load-more control fails closed if it is nested in a conversation row', async (page) => {
   await page.setContent(`
     <li class="msg-conversation-listitem">
       <h3>Unsafe row</h3><button>Load more conversations</button>
@@ -76,10 +76,7 @@ test('load-more control fails closed if it is nested in a conversation row', asy
   await assert.rejects(adapter.hasLoadMore(), ScanInvariantError);
 });
 
-test('hidden stale inbox markup cannot satisfy visible invariants or supply rows', async (t) => {
-  const browser = await chromium.launch({ headless: true });
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+browserTest('hidden stale inbox markup cannot satisfy visible invariants or supply rows', async (page) => {
   await page.setContent(`
     <section style="display:none">
       <button aria-pressed="true">Unread</button>
@@ -99,10 +96,7 @@ test('hidden stale inbox markup cannot satisfy visible invariants or supply rows
   assert.deepEqual((await adapter.readRows()).map(({ id }) => id), ['visible']);
 });
 
-test('hidden rows inside the visible inbox are not extracted', async (t) => {
-  const browser = await chromium.launch({ headless: true });
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+browserTest('hidden rows inside the visible inbox are not extracted', async (page) => {
   await page.setContent(`
     <button aria-pressed="true">Unread</button>
     <ul class="msg-conversations-container__conversations-list">
@@ -118,10 +112,7 @@ test('hidden rows inside the visible inbox are not extracted', async (t) => {
   assert.deepEqual((await adapter.readRows()).map(({ id }) => id), ['visible']);
 });
 
-test('scrolling fails closed if the visible inbox loses uniqueness', async (t) => {
-  const browser = await chromium.launch({ headless: true });
-  t.after(() => browser.close());
-  const page = await browser.newPage();
+browserTest('scrolling fails closed if the visible inbox loses uniqueness', async (page) => {
   await page.setContent(`
     <ul class="msg-conversations-container__conversations-list">
       <li id="visible" class="msg-conversation-listitem"><h3>Visible name</h3></li>

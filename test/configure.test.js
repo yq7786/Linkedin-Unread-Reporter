@@ -8,6 +8,15 @@ import { configureSlack, updateEnvText } from '../src/configure.js';
 
 const webhook = ['https://hooks.slack.com', 'services', 'AAA', 'BBB', 'CCC'].join('/');
 
+async function withTempDirectory(callback) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-reporter-'));
+  try {
+    return await callback(directory);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+}
+
 test('updateEnvText replaces the webhook and preserves unrelated settings', () => {
   const result = updateEnvText('REPORT_TIMEZONE=Pacific/Auckland\nCUSTOM=value\nSLACK_WEBHOOK_URL=old\n', {
     SLACK_WEBHOOK_URL: webhook,
@@ -18,38 +27,38 @@ test('updateEnvText replaces the webhook and preserves unrelated settings', () =
   assert.equal((result.match(/SLACK_WEBHOOK_URL=/g) || []).length, 1);
 });
 
-test('configureSlack creates a private env file without returning the secret', async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-reporter-'));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const envPath = path.join(directory, '.env');
-  const prompts = [];
+test('configureSlack creates a private env file without returning the secret', async () => {
+  await withTempDirectory(async (directory) => {
+    const envPath = path.join(directory, '.env');
+    const prompts = [];
 
-  const result = await configureSlack({
-    envPath,
-    askSecret: async (prompt) => {
-      prompts.push(prompt);
-      return webhook;
-    },
+    const result = await configureSlack({
+      envPath,
+      askSecret: async (prompt) => {
+        prompts.push(prompt);
+        return webhook;
+      },
+    });
+
+    assert.deepEqual(result, { configured: true, envPath });
+    assert.equal(prompts.length, 1);
+    assert.doesNotMatch(JSON.stringify(result), /hooks\.slack\.com/);
+    assert.match(await fs.readFile(envPath, 'utf8'), new RegExp(`SLACK_WEBHOOK_URL=${webhook}`));
+    assert.equal((await fs.stat(envPath)).mode & 0o777, 0o600);
   });
-
-  assert.deepEqual(result, { configured: true, envPath });
-  assert.equal(prompts.length, 1);
-  assert.doesNotMatch(JSON.stringify(result), /hooks\.slack\.com/);
-  assert.match(await fs.readFile(envPath, 'utf8'), new RegExp(`SLACK_WEBHOOK_URL=${webhook}`));
-  assert.equal((await fs.stat(envPath)).mode & 0o777, 0o600);
 });
 
-test('configureSlack validates before writing and does not expose the supplied value', async (t) => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-reporter-'));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  const envPath = path.join(directory, '.env');
-  const invalidSecret = 'not-a-webhook-private-value';
+test('configureSlack validates before writing and does not expose the supplied value', async () => {
+  await withTempDirectory(async (directory) => {
+    const envPath = path.join(directory, '.env');
+    const invalidSecret = 'not-a-webhook-private-value';
 
-  await assert.rejects(
-    configureSlack({ envPath, askSecret: async () => invalidSecret }),
-    (error) => !error.message.includes(invalidSecret),
-  );
-  await assert.rejects(fs.access(envPath));
+    await assert.rejects(
+      configureSlack({ envPath, askSecret: async () => invalidSecret }),
+      (error) => !error.message.includes(invalidSecret),
+    );
+    await assert.rejects(fs.access(envPath));
+  });
 });
 
 test('configureSlack removes the secret temporary file after an atomic rename failure', async () => {
