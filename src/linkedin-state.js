@@ -9,11 +9,15 @@ export class ScanInvariantError extends Error {
 export function assertUnreadListInvariants({
   unreadFilterPressed,
   conversationListPresent,
+  conversationListCount,
   activeRowCount,
   detailPaneVisible,
 }) {
   if (!unreadFilterPressed) throw new ScanInvariantError('unread-filter-not-active');
-  if (!conversationListPresent) throw new ScanInvariantError('conversation-list-missing');
+  if (!conversationListPresent || conversationListCount === 0) {
+    throw new ScanInvariantError('conversation-list-missing');
+  }
+  if (conversationListCount !== 1) throw new ScanInvariantError('conversation-list-ambiguous');
   if (activeRowCount !== 0) throw new ScanInvariantError('conversation-row-active');
   if (detailPaneVisible) throw new ScanInvariantError('conversation-detail-visible');
 }

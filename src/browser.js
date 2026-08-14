@@ -96,10 +96,12 @@ export class PlaywrightLinkedInAdapter {
         const rect = element.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       };
-      const unreadButton = [...document.querySelectorAll('button')].find((button) => (
-        /^\s*unread(?:\s|$)/i.test(button.textContent || '')
+      const unreadButtons = [...document.querySelectorAll('button')].filter((button) => (
+        /^\s*unread(?:\s|$)/i.test(button.textContent || '') && isVisible(button)
       ));
-      const rows = [...document.querySelectorAll(rowSelector)];
+      const visibleLists = [...document.querySelectorAll(listSelector)].filter(isVisible);
+      const visibleList = visibleLists.length === 1 ? visibleLists[0] : null;
+      const rows = visibleList ? [...visibleList.querySelectorAll(rowSelector)] : [];
       const activeSelector = [
         '.active',
         '.msg-conversation-listitem--active',
@@ -118,8 +120,10 @@ export class PlaywrightLinkedInAdapter {
       ].join(','))].some(isVisible);
 
       return {
-        unreadFilterPressed: unreadButton?.getAttribute('aria-pressed') === 'true',
-        conversationListPresent: Boolean(document.querySelector(listSelector)),
+        unreadFilterPressed: unreadButtons.length === 1
+          && unreadButtons[0].getAttribute('aria-pressed') === 'true',
+        conversationListPresent: visibleLists.length === 1,
+        conversationListCount: visibleLists.length,
         activeRowCount,
         detailPaneVisible,
       };
@@ -127,7 +131,11 @@ export class PlaywrightLinkedInAdapter {
   }
 
   async readRows({ limit = 51, excludeIds = [] } = {}) {
-    const rows = await this.page.locator(ROW_SELECTOR).evaluateAll((elements, options) => {
+    const visibleLists = this.page.locator(LIST_SELECTOR).filter({ visible: true });
+    if (await visibleLists.count() !== 1) {
+      throw new ScanInvariantError('conversation-list-not-uniquely-visible');
+    }
+    const rows = await visibleLists.first().locator(ROW_SELECTOR).evaluateAll((elements, options) => {
       const excluded = new Set(options.excludeIds);
       const results = [];
       let qualifyingCount = 0;
@@ -214,10 +222,16 @@ export class PlaywrightLinkedInAdapter {
 
   async scrollList() {
     const before = await this.page.evaluate(({ listSelector, rowSelector }) => {
-      const list = document.querySelector(listSelector);
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
+      const list = lists.length === 1 ? lists[0] : null;
       if (!list) return null;
       return {
-        rowCount: document.querySelectorAll(rowSelector).length,
+        rowCount: list.querySelectorAll(rowSelector).length,
         scrollHeight: list.scrollHeight,
         scrollTop: list.scrollTop,
       };
@@ -225,16 +239,28 @@ export class PlaywrightLinkedInAdapter {
     if (!before) return false;
 
     await this.page.evaluate(({ listSelector }) => {
-      const list = document.querySelector(listSelector);
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
+      const list = lists.length === 1 ? lists[0] : null;
       if (list) list.scrollTop = list.scrollHeight;
     }, { listSelector: LIST_SELECTOR });
     await this.page.waitForTimeout(750);
 
     const after = await this.page.evaluate(({ listSelector, rowSelector }) => {
-      const list = document.querySelector(listSelector);
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+      };
+      const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
+      const list = lists.length === 1 ? lists[0] : null;
       if (!list) return null;
       return {
-        rowCount: document.querySelectorAll(rowSelector).length,
+        rowCount: list.querySelectorAll(rowSelector).length,
         scrollHeight: list.scrollHeight,
         scrollTop: list.scrollTop,
       };

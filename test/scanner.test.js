@@ -8,6 +8,7 @@ const unreadUrl = 'https://www.linkedin.com/messaging/?filter=unread';
 const safeState = {
   unreadFilterPressed: true,
   conversationListPresent: true,
+  conversationListCount: 1,
   activeRowCount: 0,
   detailPaneVisible: false,
 };

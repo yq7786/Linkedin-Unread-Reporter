@@ -21,6 +21,7 @@ test('Playwright adapter extracts only row metadata from the unread fixture', as
   assert.deepEqual(await adapter.inspectState(), {
     unreadFilterPressed: true,
     conversationListPresent: true,
+    conversationListCount: 1,
     activeRowCount: 0,
     detailPaneVisible: false,
   });
@@ -38,7 +39,7 @@ test('Playwright adapter detects an active nested conversation container', async
   const page = await browser.newPage();
   await page.setContent(`
     <button aria-pressed="true">Unread</button>
-    <ul aria-label="Conversation List">
+    <ul aria-label="Conversation List" class="msg-conversations-container__conversations-list">
       <li class="msg-conversation-listitem">
         <div class="msg-conversation-card__convo-item-container--active"><h3>Opened</h3></div>
       </li>
@@ -73,4 +74,27 @@ test('load-more control fails closed if it is nested in a conversation row', asy
   `);
   const adapter = new PlaywrightLinkedInAdapter(page);
   await assert.rejects(adapter.hasLoadMore(), ScanInvariantError);
+});
+
+test('hidden stale inbox markup cannot satisfy visible invariants or supply rows', async (t) => {
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  await page.setContent(`
+    <section style="display:none">
+      <button aria-pressed="true">Unread</button>
+      <ul class="msg-conversations-container__conversations-list">
+        <li id="hidden" class="msg-conversation-listitem"><h3>Hidden stale name</h3><span aria-label="1 unread message"></span></li>
+      </ul>
+    </section>
+    <button aria-pressed="false">Unread</button>
+    <ul class="msg-conversations-container__conversations-list">
+      <li id="visible" class="msg-conversation-listitem"><h3>Visible row</h3></li>
+    </ul>
+  `);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+  const state = await adapter.inspectState();
+  assert.equal(state.unreadFilterPressed, false);
+  assert.equal(state.conversationListCount, 1);
+  assert.deepEqual((await adapter.readRows()).map(({ id }) => id), ['visible']);
 });

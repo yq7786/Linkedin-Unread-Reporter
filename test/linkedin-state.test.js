@@ -12,16 +12,18 @@ test('assertUnreadListInvariants accepts the safe unread-list state', () => {
   assert.doesNotThrow(() => assertUnreadListInvariants({
     unreadFilterPressed: true,
     conversationListPresent: true,
+    conversationListCount: 1,
     activeRowCount: 0,
     detailPaneVisible: false,
   }));
 });
 
 for (const [label, state] of [
-  ['unread filter not pressed', { unreadFilterPressed: false, conversationListPresent: true, activeRowCount: 0, detailPaneVisible: false }],
-  ['conversation list missing', { unreadFilterPressed: true, conversationListPresent: false, activeRowCount: 0, detailPaneVisible: false }],
-  ['active row', { unreadFilterPressed: true, conversationListPresent: true, activeRowCount: 1, detailPaneVisible: false }],
-  ['detail pane', { unreadFilterPressed: true, conversationListPresent: true, activeRowCount: 0, detailPaneVisible: true }],
+  ['unread filter not pressed', { unreadFilterPressed: false, conversationListPresent: true, conversationListCount: 1, activeRowCount: 0, detailPaneVisible: false }],
+  ['conversation list missing', { unreadFilterPressed: true, conversationListPresent: false, conversationListCount: 0, activeRowCount: 0, detailPaneVisible: false }],
+  ['conversation list ambiguous', { unreadFilterPressed: true, conversationListPresent: false, conversationListCount: 2, activeRowCount: 0, detailPaneVisible: false }],
+  ['active row', { unreadFilterPressed: true, conversationListPresent: true, conversationListCount: 1, activeRowCount: 1, detailPaneVisible: false }],
+  ['detail pane', { unreadFilterPressed: true, conversationListPresent: true, conversationListCount: 1, activeRowCount: 0, detailPaneVisible: true }],
 ]) {
   test(`assertUnreadListInvariants fails closed for ${label}`, () => {
     assert.throws(() => assertUnreadListInvariants(state), ScanInvariantError);
