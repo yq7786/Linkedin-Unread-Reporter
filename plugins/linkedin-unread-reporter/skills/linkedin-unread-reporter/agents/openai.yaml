@@ -1,0 +1,4 @@
+interface:
+  display_name: "LinkedIn Unread Reporter"
+  short_description: "Configure local LinkedIn unread Slack reports"
+  default_prompt: "Use $linkedin-unread-reporter to set up this clone safely."
