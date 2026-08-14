@@ -2,11 +2,14 @@
 
 **Date:** 2026-08-14  
 **Status:** Approved conversational design; awaiting written-spec review  
-**Target project:** `/Users/haydnqi/Documents/linkedin-unread-reporter`
+**Local target:** A user-selected clone directory; the path is never committed
+**Distribution:** Public GitHub-ready repository and repo-scoped Codex plugin marketplace
 
 ## Goal
 
 Build a local, read-only LinkedIn inbox reporter that visits LinkedIn's filtered unread-message page at 7:00am, 12:00pm, and 4:00pm every weekday in the `Australia/Adelaide` timezone, then posts the unread conversation count and displayed contact names to Slack.
+
+Package the reporter so other people can clone the repository, install its bundled Codex plugin, configure their own local LinkedIn session and Slack webhook, and create scheduled reports in their own timezone. No machine-specific path or account data is committed.
 
 The user accepts that automated browser access may violate LinkedIn's User Agreement and may expose the account to checkpoints or restrictions. The implementation minimizes activity but cannot remove that platform-policy risk.
 
@@ -38,6 +41,8 @@ Conversation rows were clickable elements without ordinary thread links. The rep
 
 The project is a small Node.js application using Playwright and Node's built-in test runner. It is separate from `linkedin-lead-enrichment`; it reuses that project's proven patterns for `.env` loading, a persistent headed Chromium profile, login detection, and LinkedIn checkpoint detection. It does not depend on Neon, the OpenAI API, or the lead-enrichment portal.
 
+The repository also exposes a repo-scoped Codex plugin. The plugin bundles one concise `linkedin-unread-reporter` skill that teaches Codex how to install dependencies, collect local configuration, perform supervised login and verification, run reports, diagnose failures, and create or update that user's scheduled tasks. It does not bundle an MCP server, browser extension, lifecycle hook, or credentials.
+
 The implementation is divided into focused modules:
 
 1. **Configuration** — loads and validates the Slack webhook, persistent browser-profile path, scan cap, LinkedIn URL, and authentication timeout.
@@ -47,6 +52,48 @@ The implementation is divided into focused modules:
 5. **Report formatter** — groups exact duplicate display names while preserving a count based on conversation rows.
 6. **Slack publisher** — posts a sanitized JSON payload through the webhook and never logs the secret.
 7. **CLI** — exposes configuration, scan, Slack-test, and scheduled-report entry points with meaningful exit codes.
+
+## Portable Repository Layout
+
+The public repository uses this structure:
+
+```text
+linkedin-unread-reporter/
+├── .agents/plugins/marketplace.json
+├── .gitignore
+├── README.md
+├── package.json
+├── src/
+├── test/
+├── fixtures/
+├── docs/superpowers/
+└── plugins/linkedin-unread-reporter/
+    ├── .codex-plugin/plugin.json
+    └── skills/linkedin-unread-reporter/
+        ├── SKILL.md
+        ├── agents/openai.yaml
+        └── references/automation-setup.md
+```
+
+The root is the executable Node.js project. The plugin contains procedural Codex guidance only and operates on the current repository clone. The skill must detect the repository by checking for the expected `package.json`, `src/`, and `.env.example`; if the user installed the plugin without cloning the application, it instructs them to clone the repository rather than inventing a path.
+
+The repo marketplace entry points to `./plugins/linkedin-unread-reporter` and uses installation policy `AVAILABLE`, authentication policy `ON_INSTALL`, and category `Productivity`. The plugin has a stable kebab-case identity, semantic version, manifest, UI metadata, and MIT license metadata. The plugin and skill are validated with the official scaffold validators before release.
+
+The README is for human installation and security disclosure. Detailed agent procedures remain inside the skill and its single automation reference so human and agent documentation do not drift.
+
+## Installation and Sharing
+
+A new user follows this flow:
+
+1. Clone the public GitHub repository.
+2. Add the repository as a Codex plugin marketplace source, using the GitHub owner/repository reference or repository URL supported by Codex.
+3. Install and enable `linkedin-unread-reporter` from that marketplace.
+4. Open the cloned repository as a trusted local Codex project.
+5. Ask the bundled skill to set up LinkedIn unread reporting.
+6. Let the skill install pinned Node dependencies, collect the user's Slack webhook locally, open the persistent browser for manual LinkedIn login, run tests, and perform a supervised dry scan.
+7. Ask the skill to create the desired local scheduled tasks.
+
+This packaging follows official Codex plugin structure: a `.codex-plugin/plugin.json` manifest, skills under `skills/`, and a repo marketplace at `.agents/plugins/marketplace.json`. The repository is GitHub-ready but is not published to GitHub, a workspace, or the universal Plugins Directory without a separate explicit request.
 
 ## Configuration and Secrets
 
@@ -62,7 +109,10 @@ LINKEDIN_BROWSER_PROFILE_PATH=.linkedin-browser-profile
 LINKEDIN_UNREAD_URL=https://www.linkedin.com/messaging/?filter=unread
 MAX_UNREAD_CONVERSATIONS=50
 LINKEDIN_AUTH_TIMEOUT_MS=900000
+REPORT_TIMEZONE=Australia/Adelaide
 ```
+
+All paths in committed configuration and documentation are relative or discovered from the current clone. The user's `.env` and `.linkedin-browser-profile/` remain local and gitignored. Each installation supplies its own webhook, browser profile, report timezone, schedule, and LinkedIn login.
 
 ## Scan Algorithm
 
@@ -122,9 +172,13 @@ Create three active local Codex cron automations against this project:
 - 12:00pm every Monday through Friday; and
 - 4:00pm every Monday through Friday.
 
-Schedules use the user's Adelaide locale so daylight-saving changes follow `Australia/Adelaide`. The Mac must be awake, signed in, and able to show the headed browser. Missed executions are not backfilled; the next scheduled run performs the next scan.
+For the initial user, schedules use the Adelaide locale so daylight-saving changes follow `Australia/Adelaide`. The Mac must be awake, signed in, and able to show the headed browser. Missed executions are not backfilled; the next scheduled run performs the next scan.
+
+For shared installations, the bundled skill asks the user for their desired times, weekdays, and IANA timezone. It then creates equivalent local Codex schedules against that user's clone. It never copies the original user's Adelaide schedule unless requested.
 
 The automation prompt invokes the same scheduled-report CLI entry point. It contains no webhook or LinkedIn credential.
+
+The automation reference explains the intended scheduling behavior and required local execution environment but does not store a user's generated automation identifiers. Codex uses its scheduling capability to create or update the actual tasks on each installation.
 
 ## Failure Behavior
 
@@ -152,6 +206,7 @@ Automated tests cover:
 - exact Slack formatting for zero, normal, duplicate, and capped results;
 - sanitized Slack HTTP failures; and
 - CLI exit behavior.
+- plugin manifest, marketplace entry, skill metadata, and the absence of machine-specific paths or secret-shaped values in committed files.
 
 Browser-facing extraction uses saved HTML fixtures for deterministic tests. A supervised live verification then confirms the selectors against the current LinkedIn page without opening a conversation or changing the unread count.
 
@@ -167,7 +222,9 @@ Version one is complete when:
 4. A deliberate Slack test succeeds through the rotated webhook.
 5. A zero-result fixture sends the expected zero-count payload.
 6. The three weekday Adelaide Codex automations are active and invoke the same tested entry point.
-7. The project is installed at `/Users/haydnqi/Documents/linkedin-unread-reporter` with the `.env` and persistent browser profile excluded from git.
+7. The project runs from the user's selected clone directory with the `.env` and persistent browser profile excluded from git.
+8. A clean clone can install the repo marketplace plugin, trigger the bundled skill, and reach supervised configuration without relying on the original machine.
+9. The repository contains no webhook, LinkedIn cookie, browser-profile data, account identifier, contact name, or absolute user-home path.
 
 ## Non-Goals
 
@@ -177,3 +234,4 @@ Version one is complete when:
 - Using LinkedIn private APIs, scraping profile data, or bypassing security controls.
 - Hosting LinkedIn credentials or browser state in the cloud.
 - Persisting names, message contents, or a contact queue locally.
+- Automatically publishing the repository, plugin, or marketplace to GitHub, a ChatGPT workspace, or the universal Plugins Directory.
