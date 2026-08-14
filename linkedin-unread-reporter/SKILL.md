@@ -11,6 +11,7 @@ Operate the read-only Playwright reporter installed beside this `SKILL.md`. Neve
 
 Work from the directory containing this `SKILL.md`. Require all of:
 
+- `SKILL.md`
 - `package.json` with package name `linkedin-unread-reporter`
 - `src/cli.js`
 - `.env.example`
