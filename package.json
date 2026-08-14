@@ -5,7 +5,7 @@
   "description": "Read-only LinkedIn unread conversation reports delivered to Slack.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=18"
   },
   "scripts": {
     "test": "node --test",
@@ -16,7 +16,7 @@
     "report": "node src/cli.js scheduled-report"
   },
   "dependencies": {
-    "playwright": "1.62.1"
+    "playwright": "1.55.1"
   },
   "license": "MIT"
 }

@@ -7,35 +7,24 @@ import { promisify } from 'node:util';
 
 import { PROJECT_ROOT } from '../src/config.js';
 
-const pluginRoot = path.join(PROJECT_ROOT, 'plugins', 'linkedin-unread-reporter');
-const skillRoot = path.join(pluginRoot, 'skills', 'linkedin-unread-reporter');
+const skillRoot = PROJECT_ROOT;
 const execFileAsync = promisify(execFile);
 
-test('plugin manifest exposes only the bundled skill', async () => {
-  const manifest = JSON.parse(await fs.readFile(path.join(pluginRoot, '.codex-plugin', 'plugin.json'), 'utf8'));
-  assert.equal(manifest.name, 'linkedin-unread-reporter');
-  assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
-  assert.equal(manifest.skills, './skills/');
-  assert.equal(manifest.license, 'MIT');
-  assert.equal(manifest.interface.category, 'Productivity');
-  assert.deepEqual(manifest.interface.capabilities, ['Read-only browser scan', 'Local Slack report']);
-  assert.equal('mcpServers' in manifest, false);
-  assert.equal('hooks' in manifest, false);
-  assert.equal('apps' in manifest, false);
+async function exists(file) {
+  return fs.access(file).then(() => true, () => false);
+}
+
+test('repository root is the complete standalone skill', async () => {
+  assert.equal(await exists(path.join(skillRoot, 'SKILL.md')), true);
+  assert.equal(await exists(path.join(skillRoot, 'agents', 'openai.yaml')), true);
+  assert.equal(await exists(path.join(skillRoot, 'references', 'automation-setup.md')), true);
+  assert.equal(await exists(path.join(skillRoot, 'package.json')), true);
+  assert.equal(await exists(path.join(skillRoot, 'src', 'cli.js')), true);
 });
 
-test('repo marketplace points to the portable local plugin', async () => {
-  const marketplace = JSON.parse(await fs.readFile(
-    path.join(PROJECT_ROOT, '.agents', 'plugins', 'marketplace.json'),
-    'utf8',
-  ));
-  const entry = marketplace.plugins.find(({ name }) => name === 'linkedin-unread-reporter');
-  assert.deepEqual(entry, {
-    name: 'linkedin-unread-reporter',
-    source: { source: 'local', path: './plugins/linkedin-unread-reporter' },
-    policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
-    category: 'Productivity',
-  });
+test('plugin and marketplace wrappers are absent', async () => {
+  assert.equal(await exists(path.join(PROJECT_ROOT, '.agents', 'plugins', 'marketplace.json')), false);
+  assert.equal(await exists(path.join(PROJECT_ROOT, 'plugins', 'linkedin-unread-reporter')), false);
 });
 
 test('skill metadata and instructions are complete and portable', async () => {
@@ -46,9 +35,26 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.match(skill, /^---\nname: linkedin-unread-reporter\ndescription: .+\n---/);
   assert.match(skill, /npm run configure/);
   assert.match(skill, /never open/i);
+  assert.match(skill, /Verify Node\.js 18 or newer/);
+  assert.doesNotMatch(skill, /User Agreement/);
+  assert.doesNotMatch(skill, /Run `npm test`/);
   assert.match(metadata, /\$linkedin-unread-reporter/);
-  assert.match(automation, /IANA timezone/);
-  assert.match(automation, /local/i);
+  assert.match(automation, /Australia\/Adelaide/);
+  assert.match(automation, /7:00am/);
+  assert.match(automation, /12:00pm/);
+  assert.match(automation, /4:00pm/);
+  assert.doesNotMatch(automation, /Ask for the user's desired weekdays/);
+});
+
+test('package and lockfile require Node 18 with a compatible Playwright pin', async () => {
+  const manifest = JSON.parse(await fs.readFile(path.join(PROJECT_ROOT, 'package.json'), 'utf8'));
+  const lockfile = JSON.parse(await fs.readFile(path.join(PROJECT_ROOT, 'package-lock.json'), 'utf8'));
+
+  assert.equal(manifest.engines.node, '>=18');
+  assert.equal(manifest.dependencies.playwright, '1.55.1');
+  assert.equal(lockfile.packages[''].engines.node, '>=18');
+  assert.equal(lockfile.packages[''].dependencies.playwright, '1.55.1');
+  assert.equal(lockfile.packages['node_modules/playwright'].engines.node, '>=18');
 });
 
 async function listCommitCandidates() {
