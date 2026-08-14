@@ -5,7 +5,7 @@ description: Set up, verify, run, troubleshoot, or locally schedule the self-con
 
 # LinkedIn Unread Reporter
 
-Operate the read-only Playwright reporter installed beside this `SKILL.md`. Never ask for or store LinkedIn credentials, never put a Slack webhook in chat or an automation prompt, and never open a conversation row during scanning.
+Operate the read-only Playwright reporter installed beside this `SKILL.md`. Never ask for or store LinkedIn credentials, never repeat a supplied Slack webhook or put it in an automation prompt, and never open a conversation row during scanning.
 
 ## Verify the installation
 
@@ -14,13 +14,14 @@ Work from the directory containing this `SKILL.md`. Require all of:
 - `package.json` with package name `linkedin-unread-reporter`
 - `src/cli.js`
 - `.env.example`
+- `references/automation-setup.md`
 
-If any marker is missing, stop and tell the user to reinstall the GitHub repository root as the `linkedin-unread-reporter` skill. Do not invent a machine-specific path or require a separate application clone.
+If any marker is missing, stop immediately before installing dependencies or taking any setup action. Tell the user to remove the incomplete destination and reinstall `yq7786/Linkedin-Unread-Reporter` with `--path linkedin-unread-reporter`. If direct download failed because of a certificate-chain error, retry through the installer's supported `--method git`; never disable TLS verification. Do not invent a machine-specific path or require a separate application clone.
 
 ## Setup workflow
 
 1. Verify Node.js 18 or newer, run `npm install`, and run `npx playwright install chromium` if the browser runtime is absent.
-2. If `.env` lacks `SLACK_WEBHOOK_URL`, run `npm run configure` in an interactive local terminal. Tell the user to paste their current webhook into that hidden prompt. Do not ask them to paste it into chat, place it in a shell command, echo it, or read it back.
+2. If `.env` lacks `SLACK_WEBHOOK_URL`, tell the user once that the supplied value will remain in chat history, then ask exactly: **Please provide `SLACK_WEBHOOK_URL`.** After the response, do not quote, summarize, validate visibly, or repeat it. Start `npm run configure` in an interactive PTY and submit the supplied value through its hidden input. Never place the value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output. Do not read `.env` back; verify only the configurator's success message and that `.env` has mode `0600`.
 3. Run `npm run scan` for a supervised dry scan. A visible persistent browser opens. If LinkedIn shows login, CAPTCHA, checkpoint, or identity verification, tell the user exactly which manual action to complete in that browser and wait up to 15 minutes. Never automate or bypass the challenge.
 4. Confirm the scan completes without names in terminal logs. Obtain confirmation before `npm run slack-test`, because it sends one external Slack message.
 5. After the scan and Slack delivery verification succeed, read [references/automation-setup.md](references/automation-setup.md) completely and create or update the three fixed local schedules automatically.
@@ -34,7 +35,7 @@ If any marker is missing, stop and tell the user to reinstall the GitHub reposit
 - Stop when the list is stable with no Load more control, or after 50 eligible rows. Do not replace this with a read-message streak rule.
 - Fail closed if the Unread button is not pressed, a row is active, or a detail pane is visible.
 - Keep `.env` and `.linkedin-browser-profile/` local and gitignored. Store no contact queue, names, previews, credentials, cookies, or thread identifiers in logs.
-- Never reuse a revoked or previously disclosed webhook. Each user supplies their own current webhook locally.
+- Never reuse a revoked or previously disclosed webhook. Each user supplies their own current webhook once; after collection, keep it only in the local `.env` and the already accepted chat history.
 
 ## Scheduling
 

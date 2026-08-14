@@ -48,7 +48,7 @@ Share this GitHub repository with a teammate. In Codex, they can provide its URL
 Use $skill-installer to install yq7786/Linkedin-Unread-Reporter with --path linkedin-unread-reporter.
 ```
 
-The complete reporter is installed with the skill, so no separate application clone or plugin installation is required. On the next turn, ask: `Use $linkedin-unread-reporter to set it up.` Codex installs dependencies, requests the Slack webhook through a hidden local prompt, runs the supervised LinkedIn scan, verifies Slack delivery, and creates the three fixed schedules.
+The complete reporter is installed with the skill, so no separate application clone or plugin installation is required. On the next turn, ask: `Use $linkedin-unread-reporter to set it up.` Codex installs dependencies, asks for the Slack webhook in chat, transfers it to the configurator through hidden PTY input, runs the supervised LinkedIn scan, verifies Slack delivery, and creates the three fixed schedules. The webhook therefore remains in that teammate's Codex chat history, but it is never repeated, logged, or embedded in an automation prompt.
 
 If direct download fails because the local Python trust store cannot validate GitHub's certificate chain, retry the same named path with the installer's supported `--method git` option. Never disable TLS verification or use an unverified download.
 

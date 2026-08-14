@@ -92,3 +92,25 @@ test('Git sparse checkout of the named path contains the complete skill', async 
     await fs.rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+test('skill collects the webhook in chat and transfers it only through hidden PTY input', async () => {
+  const skill = await fs.readFile(path.join(skillRoot, 'SKILL.md'), 'utf8');
+  const installVerification = skill.indexOf('## Verify the installation');
+  const dependencySetup = skill.indexOf('npm install');
+
+  assert.notEqual(installVerification, -1);
+  assert.notEqual(dependencySetup, -1);
+  assert.ok(installVerification < dependencySetup);
+  assert.match(skill, /references\/automation-setup\.md/);
+  assert.match(skill, /stop immediately/i);
+  assert.match(skill, /Please provide `SLACK_WEBHOOK_URL`\./);
+  assert.match(skill, /chat history/i);
+  assert.match(skill, /interactive PTY/i);
+  assert.match(skill, /hidden input/i);
+  assert.match(skill, /shell command/i);
+  assert.match(skill, /command-line argument/i);
+  assert.match(skill, /environment assignment/i);
+  assert.match(skill, /patch/i);
+  assert.match(skill, /automation prompt/i);
+  assert.doesNotMatch(skill, /paste their current webhook into that hidden prompt/i);
+});
