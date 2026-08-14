@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.tmp-*
+.linkedin-browser-profile/
+playwright-report/
+test-results/
+coverage/
+.DS_Store
+*.log

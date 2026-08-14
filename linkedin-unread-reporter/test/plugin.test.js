@@ -60,11 +60,6 @@ test('package and lockfile require Node 18 with a compatible Playwright pin', as
   assert.equal(lockfile.packages['node_modules/playwright'].engines.node, '>=18');
 });
 
-test('README gives explicit repository-root installer arguments', async () => {
-  const readme = await fs.readFile(path.join(PROJECT_ROOT, 'README.md'), 'utf8');
-  assert.match(readme, /--path \. --name linkedin-unread-reporter/);
-});
-
 async function listCommitCandidates() {
   try {
     const { stdout: gitRoot } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {

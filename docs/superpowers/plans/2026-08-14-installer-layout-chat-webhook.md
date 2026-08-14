@@ -13,7 +13,7 @@
 ### Task 1: Encode the distribution contract
 
 **Files:**
-- Create: `repository-test/install-layout.test.js`
+- Create: `repository-test/install-layout.test.mjs`
 
 - [ ] **Step 1: Write the failing repository-layout test**
 
@@ -31,7 +31,7 @@ test('repository exposes a complete named skill path', async () => {
 
 - [ ] **Step 2: Run the test and verify RED**
 
-Run: `node repository-test/install-layout.test.js`
+Run: `node repository-test/install-layout.test.mjs`
 
 Expected: FAIL because `linkedin-unread-reporter/SKILL.md` does not exist yet.
 
@@ -68,7 +68,7 @@ Document that a certificate-chain failure should be retried through the supporte
 
 - [ ] **Step 4: Run the repository contract and verify GREEN**
 
-Run: `node repository-test/install-layout.test.js`
+Run: `node repository-test/install-layout.test.mjs`
 
 Expected: all repository-layout tests PASS.
 
@@ -89,7 +89,7 @@ git commit -m "fix: package skill under installer-safe path"
 
 **Files:**
 - Modify: `linkedin-unread-reporter/SKILL.md`
-- Modify: `repository-test/install-layout.test.js`
+- Modify: `repository-test/install-layout.test.mjs`
 
 - [ ] **Step 1: Add failing instruction assertions**
 
@@ -97,7 +97,7 @@ Assert that setup asks exactly `Please provide \`SLACK_WEBHOOK_URL\`.`, states t
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
-Run: `node repository-test/install-layout.test.js`
+Run: `node repository-test/install-layout.test.mjs`
 
 Expected: FAIL because the existing skill still tells the user to paste the webhook manually into the terminal.
 
@@ -107,14 +107,14 @@ Put fail-fast marker verification before dependency installation. Replace the ma
 
 - [ ] **Step 4: Run focused and complete tests**
 
-Run `node repository-test/install-layout.test.js`, then run `npm test` from `linkedin-unread-reporter/`.
+Run `node repository-test/install-layout.test.mjs`, then run `npm test` from `linkedin-unread-reporter/`.
 
 Expected: all tests PASS and no test output contains a webhook value.
 
 - [ ] **Step 5: Commit the workflow update**
 
 ```bash
-git add repository-test/install-layout.test.js linkedin-unread-reporter/SKILL.md
+git add repository-test/install-layout.test.mjs linkedin-unread-reporter/SKILL.md
 git commit -m "feat: collect Slack webhook through Codex chat"
 ```
 
