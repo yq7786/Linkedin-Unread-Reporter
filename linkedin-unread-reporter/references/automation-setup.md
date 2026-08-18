@@ -17,6 +17,9 @@ Keep the named IANA timezone so daylight-saving transitions remain automatic rat
 
 - Use Codex's automation tool, not hand-written directives.
 - Create one active local recurring automation per required time so failures and history are independent.
+- Set these fields explicitly on every automation create or update; do not inherit the current task or application defaults:
+  - model: `gpt-5.6-sol`
+  - reasoning effort: `medium`
 - Target the user's current local Codex project. Invoke the globally installed `$linkedin-unread-reporter` skill so it runs `npm run report` from its own installed directory.
 - Activate the tasks only after a supervised scan and Slack delivery verification succeed.
 - Put no webhook, LinkedIn credential, browser cookie, contact name, or machine-specific path in the prompt body.
@@ -36,5 +39,7 @@ After creation, inspect all schedules and confirm:
 2. timezone is `Australia/Adelaide`;
 3. execution is local;
 4. status is active;
-5. prompt contains no credential or absolute clone path; and
-6. all tasks invoke `$linkedin-unread-reporter` and the same `npm run report` entry point.
+5. model is `gpt-5.6-sol`;
+6. reasoning effort is `medium`;
+7. prompt contains no credential or absolute clone path; and
+8. all tasks invoke `$linkedin-unread-reporter` and the same `npm run report` entry point.

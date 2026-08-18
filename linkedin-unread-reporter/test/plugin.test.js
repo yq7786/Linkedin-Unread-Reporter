@@ -46,6 +46,9 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.match(automation, /7:00am/);
   assert.match(automation, /12:00pm/);
   assert.match(automation, /4:00pm/);
+  assert.match(automation, /model:\s*`gpt-5\.6-sol`/);
+  assert.match(automation, /reasoning effort:\s*`medium`/);
+  assert.doesNotMatch(automation, /gpt-5\.4/i);
   assert.doesNotMatch(automation, /Ask for the user's desired weekdays/);
 });
 
