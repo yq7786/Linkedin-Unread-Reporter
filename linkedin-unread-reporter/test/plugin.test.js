@@ -35,6 +35,8 @@ test('skill metadata and instructions are complete and portable', async () => {
 
   assert.match(skill, /^---\nname: linkedin-unread-reporter\ndescription: .+\n---/);
   assert.match(skill, /npm run configure/);
+  assert.match(skill, /npm run login/);
+  assert.ok(skill.indexOf('npm run login') < skill.indexOf('npm run scan'));
   assert.match(skill, /never open/i);
   assert.match(skill, /Verify Node\.js 18 or newer/);
   assert.doesNotMatch(skill, /User Agreement/);
@@ -53,6 +55,7 @@ test('package and lockfile require Node 18 with a compatible Playwright pin', as
 
   assert.equal(manifest.engines.node, '>=18');
   assert.equal(manifest.scripts.test, 'node test/run-tests.js');
+  assert.equal(manifest.scripts.login, 'node src/cli.js login');
   assert.match(manifest.scripts.check, /node test\/run-tests\.js/);
   assert.equal(manifest.dependencies.playwright, '1.55.1');
   assert.equal(lockfile.packages[''].engines.node, '>=18');

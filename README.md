@@ -33,12 +33,15 @@ npm install
 npx playwright install chromium
 npm test
 npm run configure
+npm run login
 npm run scan
 npm run slack-test
 npm run report
 ```
 
-`npm run configure` asks for the webhook without echoing it and writes a mode-`0600` `.env`. LinkedIn credentials are never requested or stored. Authentication lives only in the gitignored `.linkedin-browser-profile/` created by Playwright. If LinkedIn shows login, CAPTCHA, or a checkpoint, complete it manually in the visible browser.
+`npm run configure` asks for the webhook without echoing it and writes a mode-`0600` `.env`. LinkedIn credentials are never requested or stored. Authentication lives only in the gitignored `.linkedin-browser-profile/` created by Playwright.
+
+`npm run login` opens that persistent profile without scanning rows or contacting Slack. Complete any LinkedIn login, CAPTCHA, or checkpoint manually. After the unread inbox is detected as ready twice, Chromium closes automatically and saves the session. `npm run scan` then reopens Chromium with that saved profile, performs the read-only dry scan, and closes it again.
 
 ## Install as a standalone Codex skill
 
@@ -48,7 +51,7 @@ Share this GitHub repository with a teammate. In Codex, they can provide its URL
 Use $skill-installer to install yq7786/Linkedin-Unread-Reporter with --path linkedin-unread-reporter.
 ```
 
-The complete reporter is installed with the skill, so no separate application clone or plugin installation is required. On the next turn, ask: `Use $linkedin-unread-reporter to set it up.` Codex installs dependencies, asks for the Slack webhook in chat, transfers it to the configurator through hidden PTY input, runs the supervised LinkedIn scan, verifies Slack delivery, and creates the three fixed schedules. The webhook therefore remains in that teammate's Codex chat history, but it is never repeated, logged, or embedded in an automation prompt.
+The complete reporter is installed with the skill, so no separate application clone or plugin installation is required. On the next turn, ask: `Use $linkedin-unread-reporter to set it up.` Codex installs dependencies, asks for the Slack webhook in chat, transfers it to the configurator through hidden PTY input, prepares the persistent LinkedIn login, runs the supervised dry scan, verifies Slack delivery, and creates the three fixed schedules. The webhook therefore remains in that teammate's Codex chat history, but it is never repeated, logged, or embedded in an automation prompt.
 
 If direct download fails because the local Python trust store cannot validate GitHub's certificate chain, retry the same named path with the installer's supported `--method git` option. Never disable TLS verification or use an unverified download.
 

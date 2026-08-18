@@ -22,6 +22,12 @@ export class LinkedInBlockerError extends Error {
 
 const defaultSleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+export function isTransientNavigationError(error) {
+  const message = String(error?.message || '');
+  return /execution context was destroyed(?:, most likely because of a navigation)?/i.test(message)
+    || /cannot find context with specified id/i.test(message);
+}
+
 export async function waitForManualRecovery({
   readState,
   timeoutMs,
@@ -29,20 +35,50 @@ export async function waitForManualRecovery({
   now = Date.now,
   sleep = defaultSleep,
   onBlocker = () => {},
+  onBlockerCleared = async () => {},
 }) {
   const deadline = now() + timeoutMs;
   let lastType = null;
   let recovered = false;
+  let consecutiveReadyStates = 0;
+  let blockerNeedsReentry = false;
 
   while (true) {
-    const type = classifyBlocker(await readState());
-    if (!type) return { recovered };
-    recovered = true;
-    if (type !== lastType) {
-      onBlocker({ type });
-      lastType = type;
+    let state;
+    try {
+      state = await readState();
+    } catch (error) {
+      if (!isTransientNavigationError(error)) throw error;
+      consecutiveReadyStates = 0;
+      if (now() >= deadline) throw new LinkedInBlockerError(lastType || 'navigation');
+      await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
+      continue;
     }
-    if (now() >= deadline) throw new LinkedInBlockerError(type);
+
+    const type = classifyBlocker(state);
+    if (now() >= deadline) {
+      throw new LinkedInBlockerError(type || lastType || 'inbox readiness');
+    }
+    if (type) {
+      recovered = true;
+      consecutiveReadyStates = 0;
+      blockerNeedsReentry = true;
+      if (type !== lastType) {
+        onBlocker({ type });
+        lastType = type;
+      }
+    } else if (state.inboxReady) {
+      consecutiveReadyStates += 1;
+      if (consecutiveReadyStates >= 2) return { recovered };
+    } else {
+      consecutiveReadyStates = 0;
+      if (blockerNeedsReentry) {
+        blockerNeedsReentry = false;
+        await onBlockerCleared({ remainingMs: Math.max(1, deadline - now()) });
+      }
+    }
+
+    if (now() >= deadline) throw new LinkedInBlockerError(lastType || 'inbox readiness');
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
   }
 }
@@ -51,41 +87,64 @@ export class PlaywrightLinkedInAdapter {
   constructor(page, { onBlocker = () => {} } = {}) {
     this.page = page;
     this.onBlocker = onBlocker;
+    this.unreadUrl = null;
   }
 
-  async gotoUnread(url) {
-    await this.page.goto(url, { waitUntil: 'domcontentloaded' });
+  async gotoUnread(url, { timeoutMs } = {}) {
+    this.unreadUrl = url;
+    const options = { waitUntil: 'domcontentloaded' };
+    if (timeoutMs !== undefined) options.timeout = Math.max(1, timeoutMs);
+    await this.page.goto(url, options);
   }
 
-  async waitForUnblocked(timeoutMs) {
-    const result = await waitForManualRecovery({
+  async waitForUnblocked(timeoutMs, recoveryOptions = {}) {
+    return waitForManualRecovery({
+      ...recoveryOptions,
       timeoutMs,
       onBlocker: this.onBlocker,
-      readState: async () => ({
-        url: this.page.url(),
-        title: await this.page.title(),
-        bodyText: await this.page.evaluate(() => {
-          if (document.querySelector([
-            'iframe[src*="captcha" i]',
-            '[id*="captcha" i]',
-            '[data-test*="captcha" i]',
-          ].join(','))) return 'captcha';
-          if (document.querySelector([
-            'form[action*="checkpoint" i]',
-            '[data-test*="challenge" i]',
-            'input[name*="verification" i]',
-          ].join(','))) return 'security verification';
-          return '';
-        }),
-      }),
+      onBlockerCleared: async ({ remainingMs }) => {
+        if (!this.unreadUrl) throw new ScanInvariantError('unread-url-not-initialized');
+        await this.gotoUnread(this.unreadUrl, { timeoutMs: remainingMs });
+      },
+      readState: async () => this.page.evaluate(({ listSelector }) => {
+        const isVisible = (element) => {
+          if (!element) return false;
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && rect.width > 0
+            && rect.height > 0;
+        };
+        const unreadButtons = [...document.querySelectorAll('button')].filter((button) => (
+          /^\s*unread(?:\s|$)/i.test(button.textContent || '') && isVisible(button)
+        ));
+        const visibleLists = [...document.querySelectorAll(listSelector)].filter(isVisible);
+        let bodyText = '';
+        if (document.querySelector([
+          'iframe[src*="captcha" i]',
+          '[id*="captcha" i]',
+          '[data-test*="captcha" i]',
+        ].join(','))) {
+          bodyText = 'captcha';
+        } else if (document.querySelector([
+          'form[action*="checkpoint" i]',
+          '[data-test*="challenge" i]',
+          'input[name*="verification" i]',
+        ].join(','))) {
+          bodyText = 'security verification';
+        }
+
+        return {
+          url: window.location.href,
+          title: document.title,
+          bodyText,
+          inboxReady: unreadButtons.length === 1
+            && unreadButtons[0].getAttribute('aria-pressed') === 'true'
+            && visibleLists.length === 1,
+        };
+      }, { listSelector: LIST_SELECTOR }),
     });
-    if (result.recovered) return result;
-    await this.page.waitForLoadState('domcontentloaded');
-    await this.page
-      .getByRole('button', { name: /^Unread(?:\s|$)/i })
-      .first()
-      .waitFor({ state: 'visible', timeout: 30_000 });
-    return result;
   }
 
   async inspectState() {

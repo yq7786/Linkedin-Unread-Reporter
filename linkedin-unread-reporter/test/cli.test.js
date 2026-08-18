@@ -56,6 +56,54 @@ test('scan reports only a count and never names', async () => {
   assert.doesNotMatch(stdout.join('\n'), /Private Person/);
 });
 
+test('login bootstraps the browser profile without requiring Slack or scanning rows', async () => {
+  let loginCalls = 0;
+  let scanCalls = 0;
+  let requireWebhook;
+  const { dependencies, stdout, slackCalls } = harness({
+    readEnvImpl: () => ({}),
+    loadConfigImpl: (options) => {
+      requireWebhook = options.requireWebhook;
+      return { ...config, slackWebhookUrl: null };
+    },
+    loginImpl: async () => { loginCalls += 1; },
+    scanImpl: async () => { scanCalls += 1; return { conversations: [], truncated: false }; },
+  });
+
+  assert.equal(await runCli(['login'], dependencies), 0);
+  assert.equal(requireWebhook, false);
+  assert.equal(loginCalls, 1);
+  assert.equal(scanCalls, 0);
+  assert.equal(slackCalls.length, 0);
+  assert.match(stdout.join('\n'), /saved.*closed/i);
+  assert.doesNotMatch(stdout.join('\n'), /conversation|contact/i);
+});
+
+test('performBrowserLogin navigates and waits without reading conversation rows', async () => {
+  const { performBrowserLogin } = await import('../src/cli.js');
+  assert.equal(typeof performBrowserLogin, 'function');
+  const calls = [];
+  const adapter = {
+    gotoUnread: async (url) => calls.push(['gotoUnread', url]),
+    waitForUnblocked: async (timeoutMs) => calls.push(['waitForUnblocked', timeoutMs]),
+    readRows: async () => { throw new Error('login must not read rows'); },
+  };
+
+  await performBrowserLogin(config, {
+    chromiumImpl: { marker: 'chromium' },
+    withBrowserImpl: async (options) => {
+      assert.equal(options.profilePath, config.browserProfilePath);
+      assert.equal(options.chromium.marker, 'chromium');
+      return options.task(adapter);
+    },
+  });
+
+  assert.deepEqual(calls, [
+    ['gotoUnread', config.unreadUrl],
+    ['waitForUnblocked', config.authTimeoutMs],
+  ]);
+});
+
 test('slack-test sends one clearly labeled message', async () => {
   const { dependencies, slackCalls } = harness();
   assert.equal(await runCli(['slack-test'], dependencies), 0);

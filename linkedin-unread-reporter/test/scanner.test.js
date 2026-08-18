@@ -72,13 +72,14 @@ test('scanner does not accept a transient empty list as stable', async () => {
   assert.deepEqual(result.conversations, [{ id: 'late', name: 'Person late' }]);
 });
 
-test('scanner re-enters the direct unread URL after manual blocker recovery', async () => {
+test('scanner leaves post-blocker unread re-entry to the readiness adapter', async () => {
   const adapter = new FakeAdapter(
     [{ rows: [row('1')] }],
-    [{ recovered: true }, { recovered: false }],
+    [{ recovered: true }],
   );
   await scanUnreadConversations({ adapter, unreadUrl, cap: 50, authTimeoutMs: 10 });
-  assert.deepEqual(adapter.visited, [unreadUrl, unreadUrl]);
+  assert.deepEqual(adapter.visited, [unreadUrl]);
+  assert.equal(adapter.blockerResults.length, 0);
 });
 
 test('scanner uses load more before scrolling', async () => {

@@ -16,11 +16,7 @@ export async function scanUnreadConversations({
   requiredStablePasses = 3,
 }) {
   await adapter.gotoUnread(unreadUrl);
-  for (let recoveryAttempt = 0; recoveryAttempt < 3; recoveryAttempt += 1) {
-    const { recovered = false } = await adapter.waitForUnblocked(authTimeoutMs) || {};
-    if (!recovered) break;
-    await adapter.gotoUnread(unreadUrl);
-  }
+  await adapter.waitForUnblocked(authTimeoutMs);
 
   const conversations = new Map();
   let stablePasses = 0;

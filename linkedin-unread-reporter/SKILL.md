@@ -23,10 +23,11 @@ If any marker is missing, stop immediately before installing dependencies or tak
 
 1. Verify Node.js 18 or newer, run `npm install`, and run `npx playwright install chromium` if the browser runtime is absent.
 2. If `.env` lacks `SLACK_WEBHOOK_URL`, tell the user once that the supplied value will remain in chat history, then ask exactly: **Please provide `SLACK_WEBHOOK_URL`.** After the response, do not quote, summarize, validate visibly, or repeat it. Start `npm run configure` in an interactive PTY and submit the supplied value through its hidden input. Never place the value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output. Do not read `.env` back; verify only the configurator's success message and that `.env` has mode `0600`.
-3. Run `npm run scan` for a supervised dry scan. A visible persistent browser opens. If LinkedIn shows login, CAPTCHA, checkpoint, or identity verification, tell the user exactly which manual action to complete in that browser and wait up to 15 minutes. Never automate or bypass the challenge.
-4. Confirm the scan completes without names in terminal logs. Obtain confirmation before `npm run slack-test`, because it sends one external Slack message.
-5. After the scan and Slack delivery verification succeed, read [references/automation-setup.md](references/automation-setup.md) completely and create or update the three fixed local schedules automatically.
-6. Run `npm run report` only when the user asks for or approves a real report.
+3. Run `npm run login` to prepare the persistent LinkedIn session without scanning conversation rows or contacting Slack. A visible browser opens. If LinkedIn shows login, CAPTCHA, checkpoint, or identity verification, tell the user exactly which manual action to complete there and wait up to 15 minutes. Never automate or bypass the challenge. After the unread inbox is detected as ready twice, the command saves the browser profile and closes Chromium automatically.
+4. Run `npm run scan` for a supervised dry scan. Explain that it reopens Chromium with the session saved by the login command, reads only unread conversation-list rows, and closes again when finished.
+5. Confirm the scan completes without names in terminal logs. Obtain confirmation before `npm run slack-test`, because it sends one external Slack message.
+6. After the scan and Slack delivery verification succeed, read [references/automation-setup.md](references/automation-setup.md) completely and create or update the three fixed local schedules automatically.
+7. Run `npm run report` only when the user asks for or approves a real report.
 
 ## Safety invariants
 
@@ -44,7 +45,7 @@ Use Codex's automation capability to create or update local schedules against th
 
 ## Troubleshooting
 
-- For login/CAPTCHA/checkpoint failures, keep the visible browser open for manual recovery. If unresolved after 15 minutes, report failure and do not send Slack.
+- For login/CAPTCHA/checkpoint failures, use `npm run login` and keep its visible browser open for manual recovery. If unresolved after 15 minutes, report failure and do not send Slack. Ordinary LinkedIn navigation during recovery is retried within that same deadline; browser-closed and unexpected errors still fail immediately.
 - For selector or invariant failures, do not weaken the safety checks. Reproduce with a sanitized fixture and update tests before code.
 - For Slack failures, report only the status category or sanitized network error. Never print the webhook or Slack response body.
 - Scheduled runs are local: the computer must be awake, signed in, and able to display the headed browser. Missed runs are not backfilled.

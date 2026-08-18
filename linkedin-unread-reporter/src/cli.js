@@ -9,7 +9,24 @@ import { formatSlackReport } from './report.js';
 import { scanUnreadConversations } from './scanner.js';
 import { postSlackReport } from './slack.js';
 
-const usage = 'Usage: node src/cli.js <configure|scan|slack-test|scheduled-report>';
+const usage = 'Usage: node src/cli.js <configure|login|scan|slack-test|scheduled-report>';
+
+export async function performBrowserLogin(config, {
+  onBlocker = () => {},
+  chromiumImpl,
+  withBrowserImpl = withPersistentBrowser,
+} = {}) {
+  const chromium = chromiumImpl || (await import('playwright')).chromium;
+  return withBrowserImpl({
+    chromium,
+    profilePath: config.browserProfilePath,
+    onBlocker,
+    task: async (adapter) => {
+      await adapter.gotoUnread(config.unreadUrl);
+      return adapter.waitForUnblocked(config.authTimeoutMs);
+    },
+  });
+}
 
 export async function performBrowserScan(config, { onBlocker = () => {} } = {}) {
   const { chromium } = await import('playwright');
@@ -35,6 +52,7 @@ function defaultDependencies(overrides) {
     loadConfigImpl: loadConfig,
     readEnvImpl: readProjectEnv,
     configureSlackImpl: configureSlack,
+    loginImpl: performBrowserLogin,
     scanImpl: performBrowserScan,
     postSlackImpl: postSlackReport,
     now: () => new Date(),
@@ -58,12 +76,12 @@ export async function runCli(argv, overrides = {}) {
       return 0;
     }
 
-    if (!['scan', 'slack-test', 'scheduled-report'].includes(command)) {
+    if (!['login', 'scan', 'slack-test', 'scheduled-report'].includes(command)) {
       dependencies.stderr(usage);
       return 1;
     }
 
-    const requireWebhook = command !== 'scan';
+    const requireWebhook = !['login', 'scan'].includes(command);
     let env = dependencies.readEnvImpl({ projectRoot: dependencies.projectRoot });
     let config;
     try {
@@ -99,11 +117,19 @@ export async function runCli(argv, overrides = {}) {
       return 0;
     }
 
-    const scanResult = await dependencies.scanImpl(config, {
+    const blockerOptions = {
       onBlocker: ({ type }) => dependencies.stderr(
         `LinkedIn requires manual ${type}. Complete it in the visible browser within 15 minutes.`,
       ),
-    });
+    };
+
+    if (command === 'login') {
+      await dependencies.loginImpl(config, blockerOptions);
+      dependencies.stdout('LinkedIn session saved and login browser closed.');
+      return 0;
+    }
+
+    const scanResult = await dependencies.scanImpl(config, blockerOptions);
     const count = scanResult.conversations.length;
 
     if (command === 'scan') {
