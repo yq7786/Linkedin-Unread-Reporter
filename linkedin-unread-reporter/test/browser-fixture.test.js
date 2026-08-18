@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
-import { PlaywrightLinkedInAdapter } from '../src/browser.js';
+import { LinkedInBlockerError, PlaywrightLinkedInAdapter } from '../src/browser.js';
 import { normalizeConversationRow, ScanInvariantError } from '../src/linkedin-state.js';
 
 const fixtures = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
@@ -110,6 +110,77 @@ browserTest('hidden rows inside the visible inbox are not extracted', async (pag
   `);
   const adapter = new PlaywrightLinkedInAdapter(page);
   assert.deepEqual((await adapter.readRows()).map(({ id }) => id), ['visible']);
+});
+
+browserTest('hidden CAPTCHA elements do not block a ready unread inbox', async (page) => {
+  await page.setContent(`
+    <button aria-pressed="true">Unread</button>
+    <ul class="msg-conversations-container__conversations-list" style="width:100px;height:20px"></ul>
+    <iframe src="about:blank?captcha" style="display:none"></iframe>
+    <div data-test="captcha-container" hidden></div>
+    <form action="/checkpoint/verify" style="display:none"></form>
+    <input name="verification-code" hidden>
+  `);
+  const notices = [];
+  let clock = 0;
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    onBlocker: ({ type }) => notices.push(type),
+  });
+
+  const result = await adapter.waitForUnblocked(100, {
+    pollIntervalMs: 10,
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  });
+
+  assert.deepEqual(result, { recovered: false });
+  assert.deepEqual(notices, []);
+});
+
+browserTest('a visible CAPTCHA still blocks a ready unread inbox', async (page) => {
+  await page.setContent(`
+    <button aria-pressed="true">Unread</button>
+    <ul class="msg-conversations-container__conversations-list" style="width:100px;height:20px"></ul>
+    <div data-test="captcha-container" style="width:20px;height:20px"></div>
+  `);
+  const notices = [];
+  let clock = 0;
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    onBlocker: ({ type }) => notices.push(type),
+  });
+
+  await assert.rejects(
+    adapter.waitForUnblocked(20, {
+      pollIntervalMs: 20,
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+    }),
+    (error) => error instanceof LinkedInBlockerError && error.type === 'captcha',
+  );
+  assert.deepEqual(notices, ['captcha']);
+});
+
+browserTest('a visible challenge still blocks a ready unread inbox', async (page) => {
+  await page.setContent(`
+    <button aria-pressed="true">Unread</button>
+    <ul class="msg-conversations-container__conversations-list" style="width:100px;height:20px"></ul>
+    <form action="/checkpoint/verify" style="width:20px;height:20px"></form>
+  `);
+  const notices = [];
+  let clock = 0;
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    onBlocker: ({ type }) => notices.push(type),
+  });
+
+  await assert.rejects(
+    adapter.waitForUnblocked(20, {
+      pollIntervalMs: 20,
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+    }),
+    (error) => error instanceof LinkedInBlockerError && error.type === 'challenge',
+  );
+  assert.deepEqual(notices, ['challenge']);
 });
 
 browserTest('scrolling fails closed if the visible inbox loses uniqueness', async (page) => {

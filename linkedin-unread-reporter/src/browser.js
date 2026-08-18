@@ -120,14 +120,17 @@ export class PlaywrightLinkedInAdapter {
           /^\s*unread(?:\s|$)/i.test(button.textContent || '') && isVisible(button)
         ));
         const visibleLists = [...document.querySelectorAll(listSelector)].filter(isVisible);
+        const hasVisibleMatch = (selector) => (
+          [...document.querySelectorAll(selector)].some(isVisible)
+        );
         let bodyText = '';
-        if (document.querySelector([
+        if (hasVisibleMatch([
           'iframe[src*="captcha" i]',
           '[id*="captcha" i]',
           '[data-test*="captcha" i]',
         ].join(','))) {
           bodyText = 'captcha';
-        } else if (document.querySelector([
+        } else if (hasVisibleMatch([
           'form[action*="checkpoint" i]',
           '[data-test*="challenge" i]',
           'input[name*="verification" i]',
