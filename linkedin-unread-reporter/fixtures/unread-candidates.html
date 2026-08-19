@@ -11,7 +11,7 @@
           <p>Private Ada message preview</p>
         </li>
         <li id="human-2" class="msg-conversation-listitem msg-conversation-listitem--unread"
-            onclick="history.pushState({}, '', '/messaging/thread/thread-2/'); document.querySelector('.msg-thread').hidden = false">
+            onclick="history.pushState({}, '', '/messaging/thread/thread-2/'); this.classList.add('active'); document.querySelector('.msg-thread').hidden = false">
           <h3 class="msg-conversation-listitem__participant-names">Grace</h3>
           <span aria-label="Unread message"></span>
           <p>Private Grace message content</p>
