@@ -63,7 +63,7 @@ function parseBoundedInteger(value, fallback, name, { min, max }) {
   return parsed;
 }
 
-function validatePortalUrl(value) {
+export function validatePortalUrl(value) {
   if (!value) return null;
   try {
     if (typeof value !== 'string'
@@ -82,7 +82,7 @@ function validatePortalUrl(value) {
   }
 }
 
-function validatePortalCallSecret(value) {
+export function validatePortalCallSecret(value) {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string' || /[\p{C}\p{Z}\s'"]/u.test(value)) {
     throw new ConfigError('PORTAL_CALL_SECRET must contain only printable non-space characters and no quotes. Run `npm run configure`.');
