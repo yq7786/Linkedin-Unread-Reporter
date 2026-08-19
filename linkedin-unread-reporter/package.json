@@ -17,7 +17,8 @@
     "report": "node src/cli.js scheduled-report"
   },
   "dependencies": {
-    "playwright": "1.55.1"
+    "playwright": "1.55.1",
+    "proper-lockfile": "4.1.2"
   },
   "license": "MIT"
 }

@@ -61,8 +61,11 @@ test('package and lockfile require Node 18 with a compatible Playwright pin', as
   assert.equal(manifest.scripts.login, 'node src/cli.js login');
   assert.match(manifest.scripts.check, /node test\/run-tests\.js/);
   assert.equal(manifest.dependencies.playwright, '1.55.1');
+  assert.equal(manifest.dependencies['proper-lockfile'], '4.1.2');
   assert.equal(lockfile.packages[''].engines.node, '>=18');
   assert.equal(lockfile.packages[''].dependencies.playwright, '1.55.1');
+  assert.equal(lockfile.packages[''].dependencies['proper-lockfile'], '4.1.2');
+  assert.equal(lockfile.packages['node_modules/proper-lockfile'].version, '4.1.2');
   assert.equal(lockfile.packages['node_modules/playwright'].engines.node, '>=18');
 });
 
