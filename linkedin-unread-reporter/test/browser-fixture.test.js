@@ -148,6 +148,279 @@ browserTest('direct opening fails closed when navigation lands on a different va
   );
 });
 
+browserTest('openConversation treats nested thread selectors as one visible thread', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/nested-thread/';
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-thread-no-boundary.html'), 'utf8');
+  await page.route(url, async (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 1_000,
+    recoveryOptions: { pollIntervalMs: 10 },
+  });
+
+  assert.equal(await adapter.openConversation({ conversationUrl: url }), url);
+});
+
+browserTest('readThreadMessages extracts visible direction, content type, id, and time metadata', async (page) => {
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-thread.html'), 'utf8');
+  await page.route('https://www.linkedin.com/messaging/thread/thread-1/', async (route) => {
+    await route.fulfill({ contentType: 'text/html', body: fixture });
+  });
+  await page.goto('https://www.linkedin.com/messaging/thread/thread-1/');
+  const adapter = new PlaywrightLinkedInAdapter(page);
+
+  const snapshot = await adapter.readThreadMessages();
+
+  assert.equal(snapshot.conversationUrl, 'https://www.linkedin.com/messaging/thread/thread-1/');
+  assert.equal(snapshot.unreadBoundaryIndex, 2);
+  assert.equal(snapshot.messages.length, 5);
+  assert.deepEqual(snapshot.messages[2], {
+    linkedinMessageId: 'message-3',
+    direction: 'inbound',
+    contentType: 'text',
+    content: 'Hello\nfrom LinkedIn 👋',
+    sentAt: '2026-08-19T02:05:00.000Z',
+    sentAtRaw: '11:35am',
+  });
+  assert.deepEqual(snapshot.messages[3], {
+    linkedinMessageId: 'message-4',
+    direction: 'outbound',
+    contentType: 'text',
+    content: 'Thanks!',
+    sentAt: null,
+    sentAtRaw: '5 min ago',
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot), /Hidden stale|Private ignored|Private image/);
+});
+
+browserTest('thread extraction records visible non-text labels without following links', async (page) => {
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-thread.html'), 'utf8');
+  let downloadCalls = 0;
+  page.on('download', () => { downloadCalls += 1; });
+  await page.route('https://www.linkedin.com/messaging/thread/thread-1/', async (route) => {
+    await route.fulfill({ contentType: 'text/html', body: fixture });
+  });
+  await page.goto('https://www.linkedin.com/messaging/thread/thread-1/');
+  const adapter = new PlaywrightLinkedInAdapter(page);
+
+  const snapshot = await adapter.readThreadMessages();
+
+  assert.equal(snapshot.messages.at(-1).contentType, 'image');
+  assert.equal(snapshot.messages.at(-1).content, 'Image attachment');
+  assert.equal(snapshot.messages.at(-1).sentAt, null);
+  assert.equal(snapshot.messages.at(-1).sentAtRaw, 'Today at 11:36 AM');
+  assert.equal(downloadCalls, 0);
+});
+
+browserTest('thread extraction handles nested production selectors and prefers exact metadata', async (page) => {
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-thread-no-boundary.html'), 'utf8');
+  await page.route('https://www.linkedin.com/messaging/thread/thread-2/', async (route) => {
+    await route.fulfill({ contentType: 'text/html', body: fixture });
+  });
+  await page.goto('https://www.linkedin.com/messaging/thread/thread-2/');
+  const adapter = new PlaywrightLinkedInAdapter(page);
+  const expectedLocal = await page.evaluate(() => new Date(2026, 7, 19, 11, 40).toISOString());
+
+  const snapshot = await adapter.readThreadMessages();
+
+  assert.equal(snapshot.unreadBoundaryIndex, null);
+  assert.deepEqual(snapshot.messages, [{
+    linkedinMessageId: 'urn:li:msg_message:message-6',
+    direction: 'inbound',
+    contentType: 'text',
+    content: 'Only visible message',
+    sentAt: expectedLocal,
+    sentAtRaw: 'August 19, 2026 at 11:40 AM',
+  }]);
+});
+
+browserTest('thread extraction rejects impossible datetime metadata instead of normalizing it', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/invalid-time/';
+  await page.route(url, async (route) => route.fulfill({
+    contentType: 'text/html',
+    body: '<section class="msg-thread"><div data-reporter-message data-reporter-direction="inbound"><p data-reporter-content>Private message</p><time datetime="2026-02-30T02:05:00.000Z">Feb 30</time></div></section>',
+  }));
+  await page.goto(url);
+
+  await assert.rejects(
+    new PlaywrightLinkedInAdapter(page).readThreadMessages(),
+    (error) => error instanceof ScanInvariantError
+      && error.code === 'message-time-invalid'
+      && !error.message.includes('Private message'),
+  );
+});
+
+browserTest('thread extraction never inherits a generic thread id as message identity', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/identity-scope/';
+  await page.route(url, async (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `
+      <section class="msg-thread" id="private-thread-dom-id">
+        <div data-reporter-message data-reporter-direction="inbound">
+          <p data-reporter-content>First message without an id</p>
+          <time datetime="2026-08-19T01:00:00.000Z">10:30am</time>
+        </div>
+        <div data-reporter-message data-reporter-direction="inbound">
+          <p data-reporter-content>Second message without an id</p>
+          <time datetime="2026-08-19T01:01:00.000Z">10:31am</time>
+        </div>
+      </section>
+    `,
+  }));
+  await page.goto(url);
+
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+
+  assert.deepEqual(snapshot.messages.map(({ linkedinMessageId }) => linkedinMessageId), [null, null]);
+  assert.doesNotMatch(JSON.stringify(snapshot), /private-thread-dom-id/);
+});
+
+browserTest('thread extraction normalizes exact title and aria timestamps in browser local time', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/exact-labels/';
+  await page.route(url, async (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `
+      <section class="msg-thread">
+        <div data-reporter-message data-reporter-direction="inbound">
+          <p data-reporter-content>Exact aria wins</p>
+          <time title="5 min ago" aria-label="August 19, 2026 at 11:40 AM">Now</time>
+        </div>
+        <div data-reporter-message data-reporter-direction="outbound">
+          <p data-reporter-content>Exact ISO title</p>
+          <time title="2026-08-19T02:15:00.000Z">1 min ago</time>
+        </div>
+      </section>
+    `,
+  }));
+  await page.goto(url);
+  const expectedLocal = await page.evaluate(() => new Date(2026, 7, 19, 11, 40).toISOString());
+
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+
+  assert.equal(snapshot.messages[0].sentAt, expectedLocal);
+  assert.equal(snapshot.messages[0].sentAtRaw, 'August 19, 2026 at 11:40 AM');
+  assert.equal(snapshot.messages[1].sentAt, '2026-08-19T02:15:00.000Z');
+  assert.equal(snapshot.messages[1].sentAtRaw, '2026-08-19T02:15:00.000Z');
+});
+
+browserTest('thread extraction hovers only its timestamp to resolve one exact tooltip', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/tooltip-time/';
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-thread-tooltip.html'), 'utf8');
+  await page.route(url, async (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  await page.goto(url);
+  const expectedLocal = await page.evaluate(() => new Date(2026, 7, 19, 11, 40).toISOString());
+
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+
+  assert.equal(snapshot.messages[0].sentAt, expectedLocal);
+  assert.equal(snapshot.messages[0].sentAtRaw, 'August 19, 2026 at 11:40 AM');
+  assert.equal(await page.evaluate(() => window.timestampHoverCalls), 1);
+  assert.equal(await page.evaluate(() => window.timestampClickCalls || 0), 0);
+});
+
+browserTest('thread extraction labels production non-text messages without activating attachments', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/non-text/';
+  let downloadCalls = 0;
+  page.on('download', () => { downloadCalls += 1; });
+  await page.route(url, async (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `
+      <section class="msg-thread">
+        <div data-reporter-message data-reporter-direction="inbound"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" alt="Profile screenshot"></div>
+        <div data-reporter-message data-reporter-direction="inbound"><div class="msg-s-event-listitem__file-attachment"><a href="https://www.linkedin.com/attachment/private" download onclick="window.attachmentClicks = (window.attachmentClicks || 0) + 1">Project brief.pdf</a></div></div>
+        <div data-reporter-message data-reporter-direction="inbound"><div class="msg-s-event-listitem__voice-message" aria-label="Voice message">Voice message</div></div>
+        <div data-reporter-message data-reporter-direction="outbound"><article class="msg-s-event-listitem__shared-post" aria-label="Shared post"><img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" alt="Post preview">Shared post</article></div>
+      </section>
+    `,
+  }));
+  await page.goto(url);
+
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+
+  assert.deepEqual(snapshot.messages.map(({ contentType, content }) => ({ contentType, content })), [
+    { contentType: 'image', content: 'Profile screenshot' },
+    { contentType: 'file', content: 'Project brief.pdf' },
+    { contentType: 'audio', content: 'Voice message' },
+    { contentType: 'shared_post', content: 'Shared post' },
+  ]);
+  assert.equal(await page.evaluate(() => window.attachmentClicks || 0), 0);
+  assert.equal(downloadCalls, 0);
+  assert.equal(page.url(), url);
+});
+
+browserTest('thread extraction does not mistake a visible sender avatar for message content', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/text-with-avatar/';
+  await page.route(url, async (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `
+      <section class="msg-thread">
+        <div data-reporter-message data-reporter-direction="inbound">
+          <img class="msg-s-event-listitem__profile-picture" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" alt="Private sender avatar">
+          <p data-reporter-content>Visible text remains canonical</p>
+        </div>
+      </section>
+    `,
+  }));
+  await page.goto(url);
+
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+
+  assert.equal(snapshot.messages[0].contentType, 'text');
+  assert.equal(snapshot.messages[0].content, 'Visible text remains canonical');
+  assert.doesNotMatch(JSON.stringify(snapshot), /Private sender avatar/);
+});
+
+browserTest('thread extraction fails closed when an unread thread has no canonical visible messages', async (page) => {
+  const url = 'https://www.linkedin.com/messaging/thread/empty-drift/';
+  await page.route(url, async (route) => route.fulfill({
+    contentType: 'text/html',
+    body: '<section class="msg-thread"><div data-reporter-unread-divider>Unread</div><div data-reporter-message data-reporter-direction="inbound" style="display:none"><p data-reporter-content>Private hidden stale</p></div></section>',
+  }));
+  await page.goto(url);
+
+  await assert.rejects(
+    new PlaywrightLinkedInAdapter(page).readThreadMessages(),
+    (error) => error instanceof ScanInvariantError
+      && error.code === 'message-list-missing'
+      && !error.message.includes('Private hidden stale'),
+  );
+});
+
+browserTest('thread extraction fails closed with sanitized errors on unsafe DOM or URL state', async (page) => {
+  const cases = [
+    {
+      code: 'conversation-thread-not-uniquely-visible',
+      html: '<section class="msg-thread">one</section><section class="msg-thread">two</section>',
+    },
+    {
+      code: 'message-direction-ambiguous',
+      html: '<section class="msg-thread"><div data-reporter-message data-reporter-direction="inbound" class="msg-s-event-listitem--from-me"><p data-reporter-content>Private ambiguous</p></div></section>',
+    },
+    {
+      code: 'message-content-missing',
+      html: '<section class="msg-thread"><div data-reporter-message data-reporter-direction="inbound"><span>Private untyped fallback</span></div></section>',
+    },
+  ];
+
+  for (const [index, fixtureCase] of cases.entries()) {
+    const url = `https://www.linkedin.com/messaging/thread/failure-${index}/`;
+    await page.route(url, async (route) => route.fulfill({ contentType: 'text/html', body: fixtureCase.html }));
+    await page.goto(url);
+    const adapter = new PlaywrightLinkedInAdapter(page);
+    await assert.rejects(adapter.readThreadMessages(), (error) => (
+      error instanceof ScanInvariantError
+        && error.code === fixtureCase.code
+        && !error.message.includes('Private')
+        && !error.message.includes(url)
+    ));
+  }
+
+  await page.goto('about:blank');
+  await page.setContent('<section class="msg-thread"><div data-reporter-message data-reporter-direction="inbound"><p data-reporter-content>Private content</p></div></section>');
+  await assert.rejects(new PlaywrightLinkedInAdapter(page).readThreadMessages(), (error) => (
+    error.code === 'conversation-url-invalid' && !error.message.includes('Private content')
+  ));
+});
+
 browserTest('Playwright adapter detects an active nested conversation container', async (page) => {
   await page.setContent(`
     <button aria-pressed="true">Unread</button>

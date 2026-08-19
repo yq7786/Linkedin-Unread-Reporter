@@ -1,5 +1,10 @@
 import { classifyBlocker, ScanInvariantError } from './linkedin-state.js';
-import { MessageDataError, normalizeLeadName, validateConversationUrl } from './messages.js';
+import {
+  MessageDataError,
+  normalizeLeadName,
+  normalizeVisibleText,
+  validateConversationUrl,
+} from './messages.js';
 
 const ROW_SELECTOR = [
   '[data-reporter-row-id]',
@@ -19,6 +24,69 @@ const THREAD_SELECTOR = [
   '[data-view-name="message-thread"]',
   '[data-reporter-detail-pane]',
 ].join(',');
+
+const MESSAGE_SELECTOR = [
+  '[data-reporter-message]',
+  '.msg-s-event-listitem',
+  '.msg-s-message-list__event',
+].join(',');
+
+const UNREAD_DIVIDER_SELECTOR = [
+  '[data-reporter-unread-divider]',
+  '.msg-s-message-list__unread-divider',
+  '.msg-s-message-list__unread-message-divider',
+].join(',');
+
+function classifyExactTimestamp(value) {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(normalized);
+  if (isoMatch) {
+    const [, year, month, day, hour, minute, second] = isoMatch;
+    const calendar = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+    const timestamp = new Date(normalized);
+    if (calendar.getUTCFullYear() !== Number(year)
+      || calendar.getUTCMonth() + 1 !== Number(month)
+      || calendar.getUTCDate() !== Number(day)
+      || Number(hour) > 23
+      || Number(minute) > 59
+      || Number(second) > 59
+      || Number.isNaN(timestamp.getTime())) {
+      return { kind: 'invalid' };
+    }
+    return { kind: 'exact', sentAt: timestamp.toISOString() };
+  }
+  if (/^\d{4}-\d{2}-\d{2}T/.test(normalized)) return { kind: 'invalid' };
+
+  const englishMatch = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(normalized);
+  if (englishMatch) {
+    const monthNames = [
+      'january', 'february', 'march', 'april', 'may', 'june',
+      'july', 'august', 'september', 'october', 'november', 'december',
+    ];
+    const [, monthName, dayText, yearText, hourText, minuteText, meridiem] = englishMatch;
+    const year = Number(yearText);
+    const month = monthNames.indexOf(monthName.toLowerCase());
+    const day = Number(dayText);
+    const twelveHour = Number(hourText);
+    const minute = Number(minuteText);
+    if (twelveHour < 1 || twelveHour > 12 || minute > 59) return { kind: 'invalid' };
+    const hour = (twelveHour % 12) + (meridiem.toUpperCase() === 'PM' ? 12 : 0);
+    const timestamp = new Date(year, month, day, hour, minute, 0, 0);
+    if (timestamp.getFullYear() !== year
+      || timestamp.getMonth() !== month
+      || timestamp.getDate() !== day
+      || timestamp.getHours() !== hour
+      || timestamp.getMinutes() !== minute) {
+      return { kind: 'invalid' };
+    }
+    return { kind: 'exact', sentAt: timestamp.toISOString() };
+  }
+  if (/^(?:January|February|March|April|May|June|July|August|September|October|November|December)\b/i.test(normalized)
+    && /\b\d{4}\b/.test(normalized)) {
+    return { kind: 'invalid' };
+  }
+  return { kind: 'relative' };
+}
 
 export class LinkedInBlockerError extends Error {
   constructor(type) {
@@ -482,11 +550,18 @@ export class PlaywrightLinkedInAdapter {
           ].join(','))) {
             bodyText = 'security verification';
           }
+          const visibleThreadMatches = [...document.querySelectorAll(threadSelector)]
+            .filter(isVisible);
+          const threadRoots = visibleThreadMatches.filter((candidate) => (
+            !visibleThreadMatches.some(
+              (other) => other !== candidate && candidate.contains(other),
+            )
+          ));
           return {
             url: window.location.href,
             title: document.title,
             bodyText,
-            threadCount: [...document.querySelectorAll(threadSelector)].filter(isVisible).length,
+            threadCount: threadRoots.length,
           };
         }, { threadSelector: THREAD_SELECTOR }),
       });
@@ -502,6 +577,306 @@ export class PlaywrightLinkedInAdapter {
         throw error;
       }
       throw new ScanInvariantError('conversation-open-failed');
+    }
+  }
+
+  async readThreadMessages() {
+    try {
+      const conversationUrl = validateConversationUrl(this.page.url());
+      const extracted = await this.page.evaluate((selectors) => {
+        const isVisible = (element) => {
+          if (!element) return false;
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && rect.width > 0
+            && rect.height > 0;
+        };
+        const normalizedLabel = (value) => (value || '').replace(/\s+/g, ' ').trim();
+        const visibleThreadMatches = [...document.querySelectorAll(selectors.threadSelector)]
+          .filter(isVisible);
+        const threadRoots = visibleThreadMatches.filter((candidate) => !visibleThreadMatches.some(
+          (other) => other !== candidate && candidate.contains(other),
+        ));
+        if (threadRoots.length !== 1) {
+          return { violation: 'conversation-thread-not-uniquely-visible' };
+        }
+        const [thread] = threadRoots;
+        const directionOf = (message) => {
+          const declared = (message.getAttribute('data-reporter-direction') || '').trim().toLowerCase();
+          const inbound = declared === 'inbound'
+            || message.classList.contains('msg-s-event-listitem--other')
+            || message.classList.contains('msg-s-message-list__event--from-other')
+            || Boolean(message.querySelector([
+              '[data-reporter-direction="inbound"]',
+              '.msg-s-event-listitem--other',
+              '.msg-s-message-list__event--from-other',
+            ].join(',')));
+          const outbound = declared === 'outbound'
+            || message.classList.contains('msg-s-event-listitem--from-me')
+            || message.classList.contains('msg-s-message-list__event--from-me')
+            || Boolean(message.querySelector([
+              '[data-reporter-direction="outbound"]',
+              '.msg-s-event-listitem--from-me',
+              '.msg-s-message-list__event--from-me',
+            ].join(',')));
+          return inbound === outbound ? null : (inbound ? 'inbound' : 'outbound');
+        };
+
+        const messages = [];
+        let unreadBoundaryIndex = null;
+        let unreadBoundaryCount = 0;
+        const messageSelectorPriority = [
+          '[data-reporter-message]',
+          '.msg-s-message-list__event',
+          '.msg-s-event-listitem',
+        ];
+        const messageElements = messageSelectorPriority
+          .map((selector) => [...thread.querySelectorAll(selector)].filter(isVisible))
+          .find((elements) => elements.length > 0) || [];
+        if (messageElements.length === 0) return { violation: 'message-list-missing' };
+        const dividerElements = [...thread.querySelectorAll(selectors.unreadDividerSelector)]
+          .filter(isVisible);
+        const ordered = [...messageElements, ...dividerElements].sort((left, right) => {
+          if (left === right) return 0;
+          return left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+        });
+        for (const element of ordered) {
+          if (!isVisible(element)) continue;
+          if (element.matches(selectors.unreadDividerSelector)) {
+            unreadBoundaryCount += 1;
+            if (unreadBoundaryIndex === null) unreadBoundaryIndex = messages.length;
+            continue;
+          }
+          if (!element.matches(selectors.messageSelector)) continue;
+
+          const direction = directionOf(element);
+          if (!direction) return { violation: 'message-direction-ambiguous' };
+
+          const textElements = [...element.querySelectorAll([
+            '[data-reporter-content]',
+            '.msg-s-event-listitem__body',
+            '.msg-s-event-listitem__message-bubble p',
+          ].join(','))].filter(isVisible);
+          let contentType = 'text';
+          let content = '';
+          const syntheticElements = [...element.querySelectorAll('[data-reporter-content-type]')]
+            .filter(isVisible);
+          let nonText = null;
+          if (syntheticElements.length === 1) {
+            const synthetic = syntheticElements[0];
+            nonText = {
+              type: normalizedLabel(synthetic.getAttribute('data-reporter-content-type')).toLowerCase(),
+              label: normalizedLabel(
+                synthetic.getAttribute('aria-label')
+                  || synthetic.getAttribute('title')
+                  || synthetic.getAttribute('data-reporter-label'),
+              ),
+            };
+          } else if (syntheticElements.length > 1) {
+            return { violation: 'message-content-ambiguous' };
+          } else {
+            const canonicalVisibleElements = (selector) => {
+              const matches = [...element.querySelectorAll(selector)].filter(isVisible);
+              return matches.filter((candidate) => !matches.some(
+                (other) => other !== candidate && candidate.contains(other),
+              ));
+            };
+            const categories = [
+              {
+                type: 'shared_post',
+                fallback: 'Shared post',
+                elements: canonicalVisibleElements([
+                  '[data-reporter-shared-post]',
+                  '.msg-s-event-listitem__shared-post',
+                  '.msg-s-event-listitem__feed-update',
+                ].join(',')),
+              },
+              {
+                type: 'audio',
+                fallback: 'Voice message',
+                elements: canonicalVisibleElements([
+                  '[data-reporter-voice]',
+                  '.msg-s-event-listitem__voice-message',
+                  'audio',
+                ].join(',')),
+              },
+              {
+                type: 'file',
+                fallback: 'File attachment',
+                elements: canonicalVisibleElements([
+                  '[data-reporter-attachment]',
+                  '.msg-s-event-listitem__attachment',
+                  '.msg-s-event-listitem__file-attachment',
+                  'a[download]',
+                  'a[href*="/attachment/"]',
+                ].join(',')),
+              },
+              {
+                type: 'image',
+                fallback: 'Image attachment',
+                elements: canonicalVisibleElements('img').filter((image) => !image.closest([
+                  '[data-reporter-avatar]',
+                  '.msg-s-event-listitem__profile-picture',
+                  '.presence-entity__image',
+                  '[class*="EntityPhoto"]',
+                ].join(','))),
+              },
+            ];
+            const category = categories.find(({ elements }) => elements.length > 0);
+            if (category?.elements.length > 1) {
+              return { violation: 'message-content-ambiguous' };
+            }
+            if (category) {
+              const [contentElement] = category.elements;
+              nonText = {
+                type: category.type,
+                label: normalizedLabel(
+                  contentElement.getAttribute('aria-label')
+                    || contentElement.getAttribute('alt')
+                    || contentElement.getAttribute('title')
+                    || contentElement.innerText
+                    || contentElement.closest('figure')?.getAttribute('aria-label')
+                    || category.fallback,
+                ),
+              };
+            }
+          }
+          if (textElements.length === 1 && nonText === null) {
+            content = textElements[0].innerText;
+          } else if (textElements.length === 0 && nonText !== null) {
+            contentType = nonText.type;
+            content = nonText.label;
+            if (!/^(?:image|video|audio|file|attachment|shared_post)$/.test(contentType)) {
+              return { violation: 'message-content-type-invalid' };
+            }
+          } else if (textElements.length > 1 || (textElements.length === 1 && nonText !== null)) {
+            return { violation: 'message-content-ambiguous' };
+          } else {
+            return { violation: 'message-content-missing' };
+          }
+          if (!content.trim()) return { violation: 'message-content-missing' };
+
+          const timestampElements = [...element.querySelectorAll('time')].filter(isVisible);
+          if (timestampElements.length > 1) return { violation: 'message-time-ambiguous' };
+          const timestamp = timestampElements[0] || null;
+          const datetime = timestamp?.getAttribute('datetime')?.trim() || null;
+          const title = normalizedLabel(timestamp?.getAttribute('title'));
+          const ariaLabel = normalizedLabel(timestamp?.getAttribute('aria-label'));
+          const visibleTimestamp = normalizedLabel(timestamp?.innerText);
+          const timestampIndex = timestamp
+            ? [...document.querySelectorAll('time')].indexOf(timestamp)
+            : null;
+          const linkedinMessageId = [
+            'data-reporter-message-id',
+            'data-message-id',
+            'data-event-urn',
+            'data-entity-urn',
+          ].map((attribute) => element.getAttribute(attribute)?.trim()).find(Boolean) || null;
+          messages.push({
+            linkedinMessageId,
+            direction,
+            contentType,
+            content,
+            datetime,
+            timestampTitle: title,
+            timestampAriaLabel: ariaLabel,
+            visibleTimestamp,
+            timestampIndex,
+          });
+        }
+        if (unreadBoundaryCount > 1) return { violation: 'unread-boundary-ambiguous' };
+        return { unreadBoundaryIndex, messages };
+      }, {
+        threadSelector: THREAD_SELECTOR,
+        messageSelector: MESSAGE_SELECTOR,
+        unreadDividerSelector: UNREAD_DIVIDER_SELECTOR,
+      });
+
+      if (extracted.violation) throw new ScanInvariantError(extracted.violation);
+      const messages = [];
+      for (const message of extracted.messages) {
+        let sentAt = null;
+        let sentAtRaw = message.timestampTitle
+          || message.timestampAriaLabel
+          || message.visibleTimestamp;
+        if (message.datetime !== null) {
+          const classified = classifyExactTimestamp(message.datetime);
+          if (classified.kind !== 'exact') throw new ScanInvariantError('message-time-invalid');
+          sentAt = classified.sentAt;
+          sentAtRaw = message.visibleTimestamp || message.datetime;
+        } else {
+          for (const candidate of [message.timestampTitle, message.timestampAriaLabel]) {
+            if (!candidate) continue;
+            const classified = await this.page.evaluate(classifyExactTimestamp, candidate);
+            if (classified.kind === 'invalid') {
+              throw new ScanInvariantError('message-time-invalid');
+            }
+            if (classified.kind === 'exact') {
+              sentAt = classified.sentAt;
+              sentAtRaw = candidate;
+              break;
+            }
+          }
+        }
+
+        if (sentAt === null && message.timestampIndex !== null) {
+          const timestamp = this.page.locator('time').nth(message.timestampIndex);
+          if (!await timestamp.isVisible()) throw new ScanInvariantError('message-time-drift');
+          await timestamp.hover();
+          const describedBy = (await timestamp.getAttribute('aria-describedby') || '').trim();
+          let tooltips;
+          if (describedBy) {
+            const tooltipSelector = await this.page.evaluate((value) => value
+              .split(/\s+/)
+              .filter(Boolean)
+              .map((id) => `#${CSS.escape(id)}`)
+              .join(','), describedBy);
+            tooltips = this.page.locator(tooltipSelector).filter({ visible: true });
+          } else {
+            tooltips = this.page.locator([
+              '[role="tooltip"]',
+              '.artdeco-tooltip__content',
+              '.msg-s-event-listitem__timestamp-tooltip',
+            ].join(',')).filter({ visible: true });
+          }
+          const tooltipCount = await tooltips.count();
+          if (tooltipCount > 1) throw new ScanInvariantError('message-time-tooltip-ambiguous');
+          if (tooltipCount === 1) {
+            const tooltipRaw = normalizeVisibleText(await tooltips.first().innerText());
+            const classified = await this.page.evaluate(classifyExactTimestamp, tooltipRaw);
+            if (classified.kind === 'invalid') {
+              throw new ScanInvariantError('message-time-invalid');
+            }
+            if (classified.kind === 'exact') {
+              sentAt = classified.sentAt;
+              sentAtRaw = tooltipRaw;
+            }
+          }
+        }
+
+        messages.push({
+          linkedinMessageId: message.linkedinMessageId,
+          direction: message.direction,
+          contentType: message.contentType,
+          content: normalizeVisibleText(message.content),
+          sentAt,
+          sentAtRaw,
+        });
+      }
+      const finalConversationUrl = validateConversationUrl(this.page.url());
+      if (finalConversationUrl !== conversationUrl) {
+        throw new ScanInvariantError('conversation-url-mismatch');
+      }
+      return {
+        conversationUrl: finalConversationUrl,
+        unreadBoundaryIndex: extracted.unreadBoundaryIndex,
+        messages,
+      };
+    } catch (error) {
+      if (error instanceof ScanInvariantError || error instanceof MessageDataError) throw error;
+      throw new ScanInvariantError('thread-message-read-failed');
     }
   }
 

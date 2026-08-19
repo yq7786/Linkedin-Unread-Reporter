@@ -1,0 +1,21 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <style>
+      #timestamp-tooltip { display: none; }
+      time:hover + #timestamp-tooltip { display: block; }
+    </style>
+  </head>
+  <body>
+    <section class="msg-thread">
+      <div data-reporter-message data-reporter-direction="inbound" data-message-id="tooltip-message">
+        <p data-reporter-content>Tooltip timestamp message</p>
+        <time aria-describedby="timestamp-tooltip"
+              onmouseenter="window.timestampHoverCalls = (window.timestampHoverCalls || 0) + 1"
+              onclick="window.timestampClickCalls = (window.timestampClickCalls || 0) + 1">2h</time>
+        <span id="timestamp-tooltip" role="tooltip">August 19, 2026 at 11:40 AM</span>
+      </div>
+    </section>
+  </body>
+</html>

@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+  <head><meta charset="utf-8"></head>
+  <body>
+    <main>
+      <section class="msg-thread" data-reporter-detail-pane>
+        <ol>
+          <li data-reporter-message data-reporter-direction="inbound" data-reporter-message-id="message-1">
+            <p data-reporter-content>Earlier inbound message</p>
+            <time title="August 18, 2026 at 8:00 AM">Yesterday</time>
+          </li>
+          <li data-reporter-message data-reporter-direction="outbound" data-reporter-message-id="message-2">
+            <p data-reporter-content>Earlier outbound message</p>
+            <time aria-label="August 19, 2026 at 10:15 AM">1h</time>
+          </li>
+          <li data-reporter-unread-divider>Unread messages</li>
+          <li data-reporter-message data-reporter-direction="inbound" data-reporter-message-id="message-3">
+            <p data-reporter-content>  Hello<br>from LinkedIn 👋  </p>
+            <time datetime="2026-08-19T02:05:00.000Z" title="Private ignored title">11:35am</time>
+          </li>
+          <li data-reporter-message data-reporter-direction="outbound" data-reporter-message-id="message-4">
+            <p data-reporter-content>Thanks!</p>
+            <time>5 min ago</time>
+          </li>
+          <li data-reporter-message data-reporter-direction="inbound" data-reporter-message-id="message-5">
+            <figure data-reporter-content-type="image" aria-label="  Image attachment  ">
+              <img alt="Private image description">
+            </figure>
+            <time aria-label="Today at 11:36 AM">Today</time>
+          </li>
+          <li data-reporter-message data-reporter-direction="inbound" data-reporter-message-id="hidden-private" style="display:none">
+            <p data-reporter-content>Hidden stale private message</p>
+            <time datetime="2026-08-18T00:00:00.000Z">Yesterday</time>
+          </li>
+        </ol>
+      </section>
+      <section class="msg-thread" style="display:none">
+        <div data-reporter-message data-reporter-direction="inbound">
+          <p data-reporter-content>Hidden stale thread</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
