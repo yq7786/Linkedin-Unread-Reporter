@@ -71,6 +71,29 @@ export async function readHiddenSecret({
   });
 }
 
+async function writePrivateEnv({ envPath, values, fileSystem, processId }) {
+  let existingText = '';
+  try {
+    existingText = await fileSystem.readFile(envPath, 'utf8');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  const updatedText = updateEnvText(existingText, values);
+  const temporaryPath = `${envPath}.tmp-${processId}`;
+  try {
+    await fileSystem.writeFile(temporaryPath, updatedText, {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx',
+    });
+    await fileSystem.rename(temporaryPath, envPath);
+    await fileSystem.chmod(envPath, 0o600);
+  } finally {
+    await fileSystem.rm(temporaryPath, { force: true });
+  }
+}
+
 export async function configureSlack({
   envPath = path.join(PROJECT_ROOT, '.env'),
   askSecret = (prompt) => readHiddenSecret({ prompt }),
@@ -84,26 +107,42 @@ export async function configureSlack({
     requireWebhook: true,
   });
 
-  let existingText = '';
-  try {
-    existingText = await fileSystem.readFile(envPath, 'utf8');
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+  await writePrivateEnv({
+    envPath,
+    values: { SLACK_WEBHOOK_URL: webhook },
+    fileSystem,
+    processId,
+  });
 
-  const updatedText = updateEnvText(existingText, { SLACK_WEBHOOK_URL: webhook });
-  const temporaryPath = `${envPath}.tmp-${processId}`;
-  try {
-    await fileSystem.writeFile(temporaryPath, updatedText, {
-      encoding: 'utf8',
-      mode: 0o600,
-      flag: 'wx',
-    });
-    await fileSystem.rename(temporaryPath, envPath);
-    await fileSystem.chmod(envPath, 0o600);
-  } finally {
-    await fileSystem.rm(temporaryPath, { force: true });
-  }
+  return { configured: true, envPath };
+}
+
+export async function configurePortal({
+  envPath = path.join(PROJECT_ROOT, '.env'),
+  askSecret = (prompt) => readHiddenSecret({ prompt }),
+  fileSystem = fs,
+  processId = process.pid,
+} = {}) {
+  const portalWebhookUrl = await askSecret('Portal Webhook URL (input hidden): ');
+  const portalCallSecret = await askSecret('PORTAL_CALL_SECRET (input hidden): ');
+  loadConfig({
+    env: {
+      PORTAL_WEBHOOK_URL: portalWebhookUrl,
+      PORTAL_CALL_SECRET: portalCallSecret,
+    },
+    projectRoot: path.dirname(envPath),
+    requirePortal: true,
+  });
+
+  await writePrivateEnv({
+    envPath,
+    values: {
+      PORTAL_WEBHOOK_URL: portalWebhookUrl,
+      PORTAL_CALL_SECRET: portalCallSecret,
+    },
+    fileSystem,
+    processId,
+  });
 
   return { configured: true, envPath };
 }

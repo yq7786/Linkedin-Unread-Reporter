@@ -167,3 +167,54 @@ test('loadConfig rejects HTTP portal URLs without echoing secrets', () => {
     requirePortal: true,
   }), (error) => /HTTPS/.test(error.message) && !/do-not-print-this/.test(error.message));
 });
+
+test('loadConfig rejects raw portal URL characters unsafe for unquoted env values', () => {
+  for (const portalWebhookUrl of [
+    ' https://portal.example.test/hooks/linkedin',
+    'https://portal.example.test/hooks/linkedin ',
+    'https://portal.example.test/hooks/"linkedin',
+    "https://portal.example.test/hooks/'linkedin",
+    'https://portal.example.test/hooks/linkedin\nPORTAL_CALL_SECRET=injected',
+    'https://portal.example.test/hooks/linkedin\rPORTAL_CALL_SECRET=injected',
+    'https://portal.example.test/hooks/linked in',
+    'https://portal.example.test/hooks/linked\tin',
+    'https://portal.example.test/hooks/linked\vin',
+    'https://portal.example.test/hooks/linked\fin',
+    'https://portal.example.test/hooks/linked\u00a0in',
+    'https://portal.example.test/hooks/linked\u2028in',
+    'https://portal.example.test/hooks/linked\u2029in',
+  ]) {
+    assert.throws(() => loadConfig({
+      env: { PORTAL_WEBHOOK_URL: portalWebhookUrl, PORTAL_CALL_SECRET: validCallSecret },
+      requirePortal: true,
+    }), (error) => error instanceof ConfigError && !error.message.includes(portalWebhookUrl));
+  }
+});
+
+test('loadConfig rejects call secrets unsafe for unquoted env values', () => {
+  for (const portalCallSecret of [
+    ' leading',
+    'trailing ',
+    'embedded space',
+    'embedded\ttab',
+    'line\nbreak',
+    'carriage\rreturn',
+    'single\'quote',
+    'double"quote',
+    `control${String.fromCharCode(0x7f)}character`,
+  ]) {
+    assert.throws(() => loadConfig({
+      env: { PORTAL_WEBHOOK_URL: validPortalUrl, PORTAL_CALL_SECRET: portalCallSecret },
+      requirePortal: true,
+    }), (error) => error instanceof ConfigError && !error.message.includes(portalCallSecret));
+  }
+});
+
+test('loadConfig preserves printable non-space call secrets including equals signs', () => {
+  const portalCallSecret = 'token=part==';
+  const config = loadConfig({
+    env: { PORTAL_WEBHOOK_URL: validPortalUrl, PORTAL_CALL_SECRET: portalCallSecret },
+    requirePortal: true,
+  });
+  assert.equal(config.portalCallSecret, portalCallSecret);
+});
