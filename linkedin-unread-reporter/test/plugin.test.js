@@ -93,7 +93,10 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.ok(skill.indexOf('npm run scan') < skill.indexOf('npm run deliver'));
   assert.match(skill, /approval[^\n]+npm run deliver/i);
   assert.match(skill, /direct-URL candidate[^\n]+marker[^\n]+before opening/i);
-  assert.match(skill, /anchorless[^\n]+exact row[^\n]+onOpened[^\n]+validates[^\n]+immediately persists[^\n]+before extraction/i);
+  assert.match(skill, /hidden[^\n]+stable destination[^\n]+direct-URL[^\n]+before opening/i);
+  assert.match(skill, /anchorless[^\n]+exact row[^\n]+active row[^\n]+onOpened[^\n]+before extraction/i);
+  assert.match(skill, /responsive markup[^\n]+fails closed with no marker/i);
+  assert.match(skill, /truly anchorless[^\n]+unavoidable crash window/i);
   assert.match(skill, /narrow unavoidable crash window/i);
   assert.doesNotMatch(skill, /reporter checkpoints before opening/i);
   assert.doesNotMatch(skill, /Before opening anything[^\n]+stable one-to-one conversation URL/i);

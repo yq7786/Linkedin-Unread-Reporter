@@ -553,7 +553,7 @@ function captureUnreadMessages(options: {
 }>;
 ```
 
-Process `capture_pending` entries first. For each new row, persist a recovery marker immediately after the thread opens and before extraction; on successful extraction atomically replace that marker with one message entry per selected inbound message. This closes the crash window between read-on-open and checkpointing. Refresh the direct unread URL after every conversation and never retain a Playwright row handle.
+Process `capture_pending` entries first. For each new row with a validated destination, persist a recovery marker before opening. For a truly anchorless row, accept the clicked result only when the same uniquely visible list identifies that stable row as its sole active row; recover visible blockers by returning to unread and re-resolving the still-unread row. Persist the marker before thread readiness or extraction. If the list correlation is unavailable, fail closed with no marker; a narrow unavoidable click-to-marker crash window remains. On successful extraction atomically replace that marker with one message entry per selected inbound message. Refresh the direct unread URL after every conversation and never retain a Playwright row handle.
 
 Return count-only metadata: `processedConversations`, `capturedMessages`, `pendingRecovery`, `pendingTimestamps`, and `truncated`.
 

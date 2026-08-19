@@ -52,6 +52,7 @@ const SCAN_ERROR_CODES = new Set([
   'conversation-open-checkpoint-failed',
   'conversation-open-checkpoint-invalid',
   'conversation-open-failed',
+  'conversation-open-row-mismatch',
   'conversation-row-active',
   'conversation-row-identity-ambiguous',
   'conversation-row-identity-missing',
@@ -82,7 +83,7 @@ const SCAN_ERROR_CODES = new Set([
   'unread-url-not-initialized',
 ]);
 const BLOCKER_TYPES = new Set([
-  'captcha', 'challenge', 'checkpoint', 'inbox readiness', 'login', 'navigation',
+  'captcha', 'challenge', 'checkpoint', 'inbox readiness', 'login', 'navigation', 'thread navigation',
 ]);
 const CONFIG_ERROR_MESSAGES = new Set([
   'Portal delivery is not configured. Run `npm run configure` in an interactive terminal.',
@@ -280,6 +281,7 @@ export async function performBrowserCapture(config, captureOptions, {
     profilePath: config.browserProfilePath,
     onBlocker,
     authTimeoutMs: config.authTimeoutMs,
+    signal: captureOptions.signal,
     task: (adapter) => captureImpl({ ...captureOptions, adapter }),
   });
 }

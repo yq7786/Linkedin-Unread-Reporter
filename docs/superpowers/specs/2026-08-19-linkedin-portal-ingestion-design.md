@@ -51,7 +51,7 @@ The scanner identifies at most 50 eligible one-to-one human rows. For each row i
 
 ### 4. One-conversation-at-a-time capture
 
-The reporter processes one row at a time rather than retaining live row handles. It opens the conversation, validates the resulting page, and recovers the direct URL from `page.url()` if the row did not expose one. It never sends a LinkedIn message, edits content, follows attachment links, or downloads media.
+The reporter processes one row at a time rather than retaining live row handles. Before opening, it safely extracts and validates the row itself when it is an anchor, descendant visible or hidden anchors, and allowlisted stable destination attributes; preview text is never a destination source. If the row truly exposes no destination, it clicks that row and polls the existing visible blocker classifier within the bounded authentication timeout. After blocker recovery it returns to unread, re-resolves the exact unread candidate, and clicks again. A canonical thread URL is accepted only while the same uniquely visible conversation list identifies the clicked stable row as its sole active row. The marker is then persisted before readiness or extraction. If responsive markup removes the list, or recovery finds the row read or missing, the reporter fails closed with no marker. This truly anchorless path retains a narrow unavoidable crash window between click and marker persistence. It never sends a LinkedIn message, edits content, follows attachment links, or downloads media.
 
 Unread-message selection follows this order:
 

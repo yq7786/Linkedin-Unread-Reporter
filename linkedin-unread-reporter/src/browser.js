@@ -37,6 +37,30 @@ const UNREAD_DIVIDER_SELECTOR = [
   '.msg-s-message-list__unread-message-divider',
 ].join(',');
 
+const ROW_ID_ATTRIBUTES = [
+  'data-reporter-row-id',
+  'data-conversation-id',
+  'data-entity-urn',
+  'data-control-id',
+  'id',
+];
+
+const DESTINATION_ATTRIBUTES = [
+  'data-reporter-conversation-url',
+  'data-conversation-url',
+  'data-href',
+];
+
+const ACTIVE_ROW_SELECTOR = [
+  '.active',
+  '.msg-conversation-listitem--active',
+  '.msg-conversation-card__convo-item-container--active',
+  '[aria-current="true"]',
+  '[aria-selected="true"]',
+].join(',');
+
+const DEFAULT_UNREAD_URL = 'https://www.linkedin.com/messaging/?filter=unread';
+
 function classifyExactTimestamp(value) {
   const normalized = typeof value === 'string' ? value.trim() : '';
   const isoMatch = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(normalized);
@@ -98,6 +122,22 @@ export class LinkedInBlockerError extends Error {
 
 const defaultSleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function throwIfAborted(signal) {
+  signal?.throwIfAborted();
+}
+
+async function checkedAwait(signal, operation) {
+  throwIfAborted(signal);
+  try {
+    const result = await operation();
+    throwIfAborted(signal);
+    return result;
+  } catch (error) {
+    throwIfAborted(signal);
+    throw error;
+  }
+}
+
 export function isTransientNavigationError(error) {
   const message = String(error?.message || '');
   return /execution context was destroyed(?:, most likely because of a navigation)?/i.test(message)
@@ -114,6 +154,7 @@ export async function waitForManualRecovery({
   onBlockerCleared = async () => {},
   isReady = (state) => state.inboxReady === true,
   readinessType = 'inbox readiness',
+  signal,
 }) {
   const deadline = now() + timeoutMs;
   let lastType = null;
@@ -122,14 +163,18 @@ export async function waitForManualRecovery({
   let blockerNeedsReentry = false;
 
   while (true) {
+    throwIfAborted(signal);
     let state;
     try {
-      state = await readState();
+      state = await checkedAwait(signal, readState);
     } catch (error) {
       if (!isTransientNavigationError(error)) throw error;
       consecutiveReadyStates = 0;
       if (now() >= deadline) throw new LinkedInBlockerError(lastType || 'navigation');
-      await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
+      await checkedAwait(
+        signal,
+        () => sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now()))),
+      );
       continue;
     }
 
@@ -143,12 +188,16 @@ export async function waitForManualRecovery({
       blockerNeedsReentry = true;
       if (type !== lastType) {
         onBlocker({ type });
+        throwIfAborted(signal);
         lastType = type;
       }
     } else if (blockerNeedsReentry) {
       consecutiveReadyStates = 0;
       blockerNeedsReentry = false;
-      await onBlockerCleared({ remainingMs: Math.max(1, deadline - now()) });
+      await checkedAwait(
+        signal,
+        () => onBlockerCleared({ remainingMs: Math.max(1, deadline - now()) }),
+      );
     } else if (isReady(state)) {
       consecutiveReadyStates += 1;
       if (consecutiveReadyStates >= 2) return { recovered };
@@ -157,7 +206,10 @@ export async function waitForManualRecovery({
     }
 
     if (now() >= deadline) throw new LinkedInBlockerError(lastType || readinessType);
-    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())));
+    await checkedAwait(
+      signal,
+      () => sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now()))),
+    );
   }
 }
 
@@ -166,31 +218,42 @@ export class PlaywrightLinkedInAdapter {
     onBlocker = () => {},
     authTimeoutMs = 900_000,
     recoveryOptions = {},
+    signal,
   } = {}) {
     this.page = page;
     this.onBlocker = onBlocker;
     this.authTimeoutMs = authTimeoutMs;
     this.recoveryOptions = recoveryOptions;
+    this.signal = signal;
     this.unreadUrl = null;
+  }
+
+  checkpoint() {
+    throwIfAborted(this.signal);
+  }
+
+  async pageOperation(operation) {
+    return checkedAwait(this.signal, operation);
   }
 
   async gotoUnread(url, { timeoutMs } = {}) {
     this.unreadUrl = url;
     const options = { waitUntil: 'domcontentloaded' };
     if (timeoutMs !== undefined) options.timeout = Math.max(1, timeoutMs);
-    await this.page.goto(url, options);
+    await this.pageOperation(() => this.page.goto(url, options));
   }
 
   async waitForUnblocked(timeoutMs, recoveryOptions = {}) {
     return waitForManualRecovery({
       ...recoveryOptions,
       timeoutMs,
+      signal: this.signal,
       onBlocker: this.onBlocker,
       onBlockerCleared: async ({ remainingMs }) => {
         if (!this.unreadUrl) throw new ScanInvariantError('unread-url-not-initialized');
         await this.gotoUnread(this.unreadUrl, { timeoutMs: remainingMs });
       },
-      readState: async () => this.page.evaluate(({ listSelector }) => {
+      readState: async () => this.pageOperation(() => this.page.evaluate(({ listSelector }) => {
         const isVisible = (element) => {
           if (!element) return false;
           const style = window.getComputedStyle(element);
@@ -230,12 +293,12 @@ export class PlaywrightLinkedInAdapter {
             && unreadButtons[0].getAttribute('aria-pressed') === 'true'
             && visibleLists.length === 1,
         };
-      }, { listSelector: LIST_SELECTOR }),
+      }, { listSelector: LIST_SELECTOR })),
     });
   }
 
   async inspectState() {
-    return this.page.evaluate(({ rowSelector, listSelector }) => {
+    return this.pageOperation(() => this.page.evaluate(({ rowSelector, listSelector }) => {
       const isVisible = (element) => {
         if (!element) return false;
         const style = window.getComputedStyle(element);
@@ -273,15 +336,16 @@ export class PlaywrightLinkedInAdapter {
         activeRowCount,
         detailPaneVisible,
       };
-    }, { rowSelector: ROW_SELECTOR, listSelector: LIST_SELECTOR });
+    }, { rowSelector: ROW_SELECTOR, listSelector: LIST_SELECTOR }));
   }
 
   async readRows({ limit = 51, excludeIds = [] } = {}) {
     const visibleLists = this.page.locator(LIST_SELECTOR).filter({ visible: true });
-    if (await visibleLists.count() !== 1) {
+    if (await this.pageOperation(() => visibleLists.count()) !== 1) {
       throw new ScanInvariantError('conversation-list-not-uniquely-visible');
     }
-    const rows = await visibleLists.first().locator(ROW_SELECTOR).evaluateAll((elements, options) => {
+    const rows = await this.pageOperation(() => (
+      visibleLists.first().locator(ROW_SELECTOR).evaluateAll((elements, options) => {
       const isVisible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -338,7 +402,8 @@ export class PlaywrightLinkedInAdapter {
         if (qualifyingCount >= options.limit) break;
       }
       return results;
-    }, { limit, excludeIds });
+      }, { limit, excludeIds })
+    ));
     if (rows.some((row) => row.unread && row.name && !row.id)) {
       throw new ScanInvariantError('conversation-row-identity-missing');
     }
@@ -351,11 +416,12 @@ export class PlaywrightLinkedInAdapter {
     }
     try {
       const visibleLists = this.page.locator(LIST_SELECTOR).filter({ visible: true });
-      if (await visibleLists.count() !== 1) {
+      if (await this.pageOperation(() => visibleLists.count()) !== 1) {
         throw new ScanInvariantError('conversation-list-not-uniquely-visible');
       }
 
-      const rows = await visibleLists.first().locator(ROW_SELECTOR).evaluateAll((elements) => {
+      const rows = await this.pageOperation(() => (
+        visibleLists.first().locator(ROW_SELECTOR).evaluateAll((elements, options) => {
       const isVisible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -418,10 +484,21 @@ export class PlaywrightLinkedInAdapter {
         const countLabels = ariaLabels
           .map((label) => /^(\d+) unread messages?$/i.exec(label))
           .filter(Boolean);
-        const anchors = [...row.querySelectorAll('a[href]')]
-          .filter(isVisible)
-          .map((anchor) => anchor.getAttribute('href'))
-          .filter((href) => /\/messaging\/thread\//.test(href || ''));
+        const destinationAttributes = options.destinationAttributes;
+        const destinationElements = [row, ...row.querySelectorAll([
+          '[data-reporter-conversation-url]',
+          '[data-conversation-url]',
+          '[data-href]',
+        ].join(','))].filter((element) => !element.closest(previewSelector));
+        const destinations = [
+          ...[...(row.matches('a[href]') ? [row] : []), ...row.querySelectorAll('a[href]')]
+            .filter((anchor) => !anchor.closest(previewSelector))
+            .map((anchor) => anchor.getAttribute('href')),
+          ...destinationElements.flatMap((element) => destinationAttributes.map(
+            (attribute) => element.getAttribute(attribute),
+          )),
+        ].filter((href) => /\/messaging\/thread\//.test(href || ''));
+        const anchors = [...new Set(destinations)];
         return {
           rowId,
           leadName: normalized(nameElement?.textContent),
@@ -431,7 +508,8 @@ export class PlaywrightLinkedInAdapter {
           anchors,
         };
       });
-      });
+    }, { destinationAttributes: DESTINATION_ATTRIBUTES })
+      ));
 
       const excluded = new Set(excludeRowIds);
       const candidates = [];
@@ -441,7 +519,8 @@ export class PlaywrightLinkedInAdapter {
         if (!row.rowId) throw new ScanInvariantError('conversation-row-identity-missing');
         if (seenRowIds.has(row.rowId)) throw new ScanInvariantError('conversation-row-identity-ambiguous');
         seenRowIds.add(row.rowId);
-        if (row.countLabels.length > 1 || row.anchors.length > 1) {
+        const conversationUrls = [...new Set(row.anchors.map(validateConversationUrl))];
+        if (row.countLabels.length > 1 || conversationUrls.length > 1) {
           throw new ScanInvariantError('conversation-row-metadata-ambiguous');
         }
         const unreadCount = row.countLabels.length ? Number(row.countLabels[0]) : null;
@@ -452,12 +531,13 @@ export class PlaywrightLinkedInAdapter {
           rowId: row.rowId,
           leadName: normalizeLeadName(row.leadName),
           unreadCount,
-          conversationUrl: row.anchors.length ? validateConversationUrl(row.anchors[0]) : null,
+          conversationUrl: conversationUrls[0] || null,
         });
         if (candidates.length >= limit) break;
       }
       return candidates;
     } catch (error) {
+      this.checkpoint();
       if (error instanceof ScanInvariantError || error instanceof MessageDataError) throw error;
       throw new ScanInvariantError('candidate-read-failed');
     }
@@ -469,10 +549,12 @@ export class PlaywrightLinkedInAdapter {
         throw new ScanInvariantError('conversation-row-identity-missing');
       }
       const visibleLists = this.page.locator(LIST_SELECTOR).filter({ visible: true });
-      if (await visibleLists.count() !== 1) {
+      if (await this.pageOperation(() => visibleLists.count()) !== 1) {
         throw new ScanInvariantError('conversation-list-not-uniquely-visible');
       }
-      const escapedRowId = await this.page.evaluate((value) => CSS.escape(value), candidate.rowId);
+      const escapedRowId = await this.pageOperation(
+        () => this.page.evaluate((value) => CSS.escape(value), candidate.rowId),
+      );
       const rowSelector = [
         `[data-reporter-row-id="${escapedRowId}"]`,
         `[data-conversation-id="${escapedRowId}"]`,
@@ -481,10 +563,10 @@ export class PlaywrightLinkedInAdapter {
         `[id="${escapedRowId}"]`,
       ].join(',');
       const rows = visibleLists.first().locator(rowSelector).filter({ visible: true });
-      if (await rows.count() !== 1) {
+      if (await this.pageOperation(() => rows.count()) !== 1) {
         throw new ScanInvariantError('conversation-row-not-uniquely-visible');
       }
-      const refreshed = await rows.first().evaluate((row) => {
+      const refreshed = await this.pageOperation(() => rows.first().evaluate((row, options) => {
         const isVisible = (element) => {
           const style = window.getComputedStyle(element);
           const rect = element.getBoundingClientRect();
@@ -531,10 +613,21 @@ export class PlaywrightLinkedInAdapter {
           .map((label) => /^(\d+) unread messages?$/i.exec(label))
           .filter(Boolean)
           .map((match) => match[1]);
-        const anchors = [...row.querySelectorAll('a[href]')]
-          .filter(isVisible)
-          .map((anchor) => anchor.getAttribute('href'))
-          .filter((href) => /\/messaging\/thread\//.test(href || ''));
+        const destinationAttributes = options.destinationAttributes;
+        const destinationElements = [row, ...row.querySelectorAll([
+          '[data-reporter-conversation-url]',
+          '[data-conversation-url]',
+          '[data-href]',
+        ].join(','))].filter((element) => !element.closest(previewSelector));
+        const destinations = [
+          ...[...(row.matches('a[href]') ? [row] : []), ...row.querySelectorAll('a[href]')]
+            .filter((anchor) => !anchor.closest(previewSelector))
+            .map((anchor) => anchor.getAttribute('href')),
+          ...destinationElements.flatMap((element) => destinationAttributes.map(
+            (attribute) => element.getAttribute(attribute),
+          )),
+        ].filter((href) => /\/messaging\/thread\//.test(href || ''));
+        const anchors = [...new Set(destinations)];
         return {
           leadName: normalized(nameElement?.textContent),
           unread,
@@ -542,19 +635,18 @@ export class PlaywrightLinkedInAdapter {
           countLabels,
           anchors,
         };
-      });
+      }, { destinationAttributes: DESTINATION_ATTRIBUTES }));
       if (!refreshed.unread) throw new ScanInvariantError('conversation-row-no-longer-unread');
       if (refreshed.excluded) throw new ScanInvariantError('conversation-row-no-longer-eligible');
-      if (refreshed.countLabels.length > 1 || refreshed.anchors.length > 1) {
+      const conversationUrls = [...new Set(refreshed.anchors.map(validateConversationUrl))];
+      if (refreshed.countLabels.length > 1 || conversationUrls.length > 1) {
         throw new ScanInvariantError('conversation-row-metadata-ambiguous');
       }
       const unreadCount = refreshed.countLabels.length ? Number(refreshed.countLabels[0]) : null;
       if (unreadCount !== null && (!Number.isSafeInteger(unreadCount) || unreadCount <= 0)) {
         throw new ScanInvariantError('conversation-unread-count-invalid');
       }
-      const currentUrl = refreshed.anchors.length
-        ? validateConversationUrl(refreshed.anchors[0])
-        : null;
+      const currentUrl = conversationUrls[0] || null;
       if (candidate.conversationUrl !== null && candidate.conversationUrl !== undefined) {
         const expectedUrl = validateConversationUrl(candidate.conversationUrl);
         if (currentUrl !== expectedUrl) {
@@ -568,49 +660,138 @@ export class PlaywrightLinkedInAdapter {
         conversationUrl: currentUrl,
       };
     } catch (error) {
+      this.checkpoint();
       if (error instanceof ScanInvariantError || error instanceof MessageDataError) throw error;
       throw new ScanInvariantError('candidate-revalidation-failed');
     }
   }
 
+  async exactAnchorlessRow(rowId, { requireUnread = true } = {}) {
+    if (typeof rowId !== 'string' || !rowId.trim()) {
+      throw new ScanInvariantError('conversation-row-identity-missing');
+    }
+    const visibleLists = this.page.locator(LIST_SELECTOR).filter({ visible: true });
+    if (await this.pageOperation(() => visibleLists.count()) !== 1) {
+      throw new ScanInvariantError('conversation-row-not-uniquely-visible');
+    }
+    const escapedRowId = await this.pageOperation(
+      () => this.page.evaluate((value) => CSS.escape(value), rowId),
+    );
+    const rowSelector = ROW_ID_ATTRIBUTES.map(
+      (attribute) => `[${attribute}="${escapedRowId}"]`,
+    ).join(',');
+    const rows = visibleLists.first().locator(rowSelector).filter({ visible: true });
+    if (await this.pageOperation(() => rows.count()) !== 1) {
+      throw new ScanInvariantError('conversation-row-not-uniquely-visible');
+    }
+    const row = rows.first();
+    if (requireUnread) {
+      const stillUnread = await this.pageOperation(() => row.evaluate((element) => {
+        const ariaUnread = [...element.querySelectorAll('[aria-label]')].some((candidate) => (
+          /^(?:unread message|\d+ unread messages?)$/i.test(
+            (candidate.getAttribute('aria-label') || '').trim(),
+          )
+        ));
+        return element.classList.contains('msg-conversation-listitem--unread')
+          || Boolean(element.querySelector('.msg-conversation-card__convo-item-container--unread'))
+          || ariaUnread;
+      }));
+      if (!stillUnread) throw new ScanInvariantError('conversation-row-no-longer-unread');
+    }
+    return row;
+  }
+
+  async clickExactAnchorlessRow(rowId) {
+    const row = await this.exactAnchorlessRow(rowId);
+    await this.pageOperation(() => row.click());
+  }
+
+  async assertOpenedAnchorlessRow(rowId) {
+    const state = await this.pageOperation(() => this.page.evaluate((options) => {
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden'
+          && rect.width > 0 && rect.height > 0;
+      };
+      const lists = [...document.querySelectorAll(options.listSelector)].filter(isVisible);
+      if (lists.length !== 1) return { listCount: lists.length, activeRowIds: [] };
+      const rows = [...lists[0].querySelectorAll(options.rowSelector)].filter(isVisible);
+      const activeRows = rows.filter((row) => (
+        row.matches(options.activeSelector) || row.querySelector(options.activeSelector)
+      ));
+      return {
+        listCount: 1,
+        activeRowIds: activeRows.map((row) => options.rowIdAttributes
+          .map((attribute) => row.getAttribute(attribute)).find(Boolean) || ''),
+      };
+    }, {
+      listSelector: LIST_SELECTOR,
+      rowSelector: ROW_SELECTOR,
+      activeSelector: ACTIVE_ROW_SELECTOR,
+      rowIdAttributes: ROW_ID_ATTRIBUTES,
+    }));
+    if (state.listCount !== 1
+      || state.activeRowIds.length !== 1
+      || state.activeRowIds[0] !== rowId.trim()) {
+      throw new ScanInvariantError('conversation-open-row-mismatch');
+    }
+  }
+
+  async waitForAnchorlessThread(rowId) {
+    this.unreadUrl ||= DEFAULT_UNREAD_URL;
+    await waitForManualRecovery({
+      ...this.recoveryOptions,
+      timeoutMs: this.authTimeoutMs,
+      signal: this.signal,
+      onBlocker: this.onBlocker,
+      readinessType: 'thread navigation',
+      isReady: (state) => {
+        try {
+          validateConversationUrl(state.url);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      onBlockerCleared: async ({ remainingMs }) => {
+        await this.gotoUnread(this.unreadUrl, { timeoutMs: remainingMs });
+        await this.clickExactAnchorlessRow(rowId);
+      },
+      readState: async () => this.pageOperation(() => this.page.evaluate(() => {
+        const isVisible = (element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden'
+            && rect.width > 0 && rect.height > 0;
+        };
+        const hasVisibleMatch = (selector) => (
+          [...document.querySelectorAll(selector)].some(isVisible)
+        );
+        let bodyText = '';
+        if (hasVisibleMatch('iframe[src*="captcha" i],[id*="captcha" i],[data-test*="captcha" i]')) {
+          bodyText = 'captcha';
+        } else if (hasVisibleMatch('form[action*="checkpoint" i],form[action*="login" i],[data-test*="challenge" i],input[name*="verification" i],input[type="password"]')) {
+          bodyText = 'security verification';
+        }
+        return { url: window.location.href, title: document.title, bodyText };
+      })),
+    });
+    const openedUrl = validateConversationUrl(this.page.url());
+    await this.assertOpenedAnchorlessRow(rowId);
+    return openedUrl;
+  }
+
   async openConversation({ rowId, conversationUrl }, { onOpened } = {}) {
     try {
+      this.checkpoint();
       const hasConversationUrl = conversationUrl !== null && conversationUrl !== undefined;
-      const canonicalUrl = hasConversationUrl ? validateConversationUrl(conversationUrl) : null;
+      let canonicalUrl = hasConversationUrl ? validateConversationUrl(conversationUrl) : null;
       if (canonicalUrl) {
-        await this.page.goto(canonicalUrl, { waitUntil: 'domcontentloaded' });
+        await this.pageOperation(() => this.page.goto(canonicalUrl, { waitUntil: 'domcontentloaded' }));
       } else {
-        if (typeof rowId !== 'string' || !rowId.trim()) {
-          throw new ScanInvariantError('conversation-row-identity-missing');
-        }
-        const visibleLists = this.page.locator(LIST_SELECTOR).filter({ visible: true });
-        if (await visibleLists.count() !== 1) {
-          throw new ScanInvariantError('conversation-list-not-uniquely-visible');
-        }
-        const escapedRowId = await this.page.evaluate((value) => CSS.escape(value), rowId);
-        const rowSelector = [
-          `[data-reporter-row-id="${escapedRowId}"]`,
-          `[data-conversation-id="${escapedRowId}"]`,
-          `[data-entity-urn="${escapedRowId}"]`,
-          `[data-control-id="${escapedRowId}"]`,
-          `[id="${escapedRowId}"]`,
-        ].join(',');
-        const rows = visibleLists.first().locator(rowSelector).filter({ visible: true });
-        if (await rows.count() !== 1) {
-          throw new ScanInvariantError('conversation-row-not-uniquely-visible');
-        }
-        const stillUnread = await rows.first().evaluate((row) => {
-          const ariaUnread = [...row.querySelectorAll('[aria-label]')].some((element) => (
-            /^(?:unread message|\d+ unread messages?)$/i.test(
-              (element.getAttribute('aria-label') || '').trim(),
-            )
-          ));
-          return row.classList.contains('msg-conversation-listitem--unread')
-            || Boolean(row.querySelector('.msg-conversation-card__convo-item-container--unread'))
-            || ariaUnread;
-        });
-        if (!stillUnread) throw new ScanInvariantError('conversation-row-no-longer-unread');
-        await rows.first().click();
+        await this.clickExactAnchorlessRow(rowId);
+        canonicalUrl = await this.waitForAnchorlessThread(rowId);
       }
 
       if (onOpened !== undefined) {
@@ -622,7 +803,7 @@ export class PlaywrightLinkedInAdapter {
           throw new ScanInvariantError('conversation-url-mismatch');
         }
         try {
-          await onOpened(openedUrl);
+          await checkedAwait(this.signal, () => onOpened(openedUrl));
         } catch {
           throw new ScanInvariantError('conversation-open-checkpoint-failed');
         }
@@ -631,6 +812,7 @@ export class PlaywrightLinkedInAdapter {
       await waitForManualRecovery({
         ...this.recoveryOptions,
         timeoutMs: this.authTimeoutMs,
+        signal: this.signal,
         onBlocker: this.onBlocker,
         readinessType: 'thread readiness',
         isReady: (state) => {
@@ -643,12 +825,12 @@ export class PlaywrightLinkedInAdapter {
           if (!canonicalUrl) {
             throw new ScanInvariantError('conversation-url-unavailable-for-recovery');
           }
-          await this.page.goto(canonicalUrl, {
+          await this.pageOperation(() => this.page.goto(canonicalUrl, {
             waitUntil: 'domcontentloaded',
             timeout: remainingMs,
-          });
+          }));
         },
-        readState: async () => this.page.evaluate(({ threadSelector }) => {
+        readState: async () => this.pageOperation(() => this.page.evaluate(({ threadSelector }) => {
           const isVisible = (element) => {
             if (!element) return false;
             const style = window.getComputedStyle(element);
@@ -688,7 +870,7 @@ export class PlaywrightLinkedInAdapter {
             bodyText,
             threadCount: threadRoots.length,
           };
-        }, { threadSelector: THREAD_SELECTOR }),
+        }, { threadSelector: THREAD_SELECTOR })),
       });
       const finalUrl = validateConversationUrl(this.page.url());
       if (canonicalUrl && finalUrl !== canonicalUrl) {
@@ -696,6 +878,7 @@ export class PlaywrightLinkedInAdapter {
       }
       return finalUrl;
     } catch (error) {
+      this.checkpoint();
       if (error instanceof ScanInvariantError
         || error instanceof LinkedInBlockerError
         || error instanceof MessageDataError) {
@@ -707,8 +890,9 @@ export class PlaywrightLinkedInAdapter {
 
   async readThreadMessages() {
     try {
+      this.checkpoint();
       const conversationUrl = validateConversationUrl(this.page.url());
-      const extracted = await this.page.evaluate((selectors) => {
+      const extracted = await this.pageOperation(() => this.page.evaluate((selectors) => {
         const isVisible = (element) => {
           if (!element) return false;
           const style = window.getComputedStyle(element);
@@ -917,7 +1101,7 @@ export class PlaywrightLinkedInAdapter {
         threadSelector: THREAD_SELECTOR,
         messageSelector: MESSAGE_SELECTOR,
         unreadDividerSelector: UNREAD_DIVIDER_SELECTOR,
-      });
+      }));
 
       if (extracted.violation) throw new ScanInvariantError(extracted.violation);
       const messages = [];
@@ -934,7 +1118,9 @@ export class PlaywrightLinkedInAdapter {
         } else {
           for (const candidate of [message.timestampTitle, message.timestampAriaLabel]) {
             if (!candidate) continue;
-            const classified = await this.page.evaluate(classifyExactTimestamp, candidate);
+            const classified = await this.pageOperation(
+              () => this.page.evaluate(classifyExactTimestamp, candidate),
+            );
             if (classified.kind === 'invalid') {
               throw new ScanInvariantError('message-time-invalid');
             }
@@ -948,16 +1134,20 @@ export class PlaywrightLinkedInAdapter {
 
         if (sentAt === null && message.timestampIndex !== null) {
           const timestamp = this.page.locator('time').nth(message.timestampIndex);
-          if (!await timestamp.isVisible()) throw new ScanInvariantError('message-time-drift');
-          await timestamp.hover();
-          const describedBy = (await timestamp.getAttribute('aria-describedby') || '').trim();
+          if (!await this.pageOperation(() => timestamp.isVisible())) {
+            throw new ScanInvariantError('message-time-drift');
+          }
+          await this.pageOperation(() => timestamp.hover());
+          const describedBy = (
+            await this.pageOperation(() => timestamp.getAttribute('aria-describedby')) || ''
+          ).trim();
           let tooltips;
           if (describedBy) {
-            const tooltipSelector = await this.page.evaluate((value) => value
+            const tooltipSelector = await this.pageOperation(() => this.page.evaluate((value) => value
               .split(/\s+/)
               .filter(Boolean)
               .map((id) => `#${CSS.escape(id)}`)
-              .join(','), describedBy);
+              .join(','), describedBy));
             tooltips = this.page.locator(tooltipSelector).filter({ visible: true });
           } else {
             tooltips = this.page.locator([
@@ -966,11 +1156,15 @@ export class PlaywrightLinkedInAdapter {
               '.msg-s-event-listitem__timestamp-tooltip',
             ].join(',')).filter({ visible: true });
           }
-          const tooltipCount = await tooltips.count();
+          const tooltipCount = await this.pageOperation(() => tooltips.count());
           if (tooltipCount > 1) throw new ScanInvariantError('message-time-tooltip-ambiguous');
           if (tooltipCount === 1) {
-            const tooltipRaw = normalizeVisibleText(await tooltips.first().innerText());
-            const classified = await this.page.evaluate(classifyExactTimestamp, tooltipRaw);
+            const tooltipRaw = normalizeVisibleText(
+              await this.pageOperation(() => tooltips.first().innerText()),
+            );
+            const classified = await this.pageOperation(
+              () => this.page.evaluate(classifyExactTimestamp, tooltipRaw),
+            );
             if (classified.kind === 'invalid') {
               throw new ScanInvariantError('message-time-invalid');
             }
@@ -1000,6 +1194,7 @@ export class PlaywrightLinkedInAdapter {
         messages,
       };
     } catch (error) {
+      this.checkpoint();
       if (error instanceof ScanInvariantError || error instanceof MessageDataError) throw error;
       throw new ScanInvariantError('thread-message-read-failed');
     }
@@ -1010,7 +1205,7 @@ export class PlaywrightLinkedInAdapter {
   }
 
   async listProgressSnapshot() {
-    const snapshot = await this.page.evaluate(({ listSelector, rowSelector }) => {
+    const snapshot = await this.pageOperation(() => this.page.evaluate(({ listSelector, rowSelector }) => {
       const isVisible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -1047,7 +1242,7 @@ export class PlaywrightLinkedInAdapter {
         rowCount: list.querySelectorAll(rowSelector).length,
         rowSignature,
       };
-    }, { listSelector: LIST_SELECTOR, rowSelector: ROW_SELECTOR });
+    }, { listSelector: LIST_SELECTOR, rowSelector: ROW_SELECTOR }));
     if (snapshot.listCount !== 1) {
       throw new ScanInvariantError('conversation-list-not-uniquely-visible');
     }
@@ -1080,7 +1275,9 @@ export class PlaywrightLinkedInAdapter {
     let after = await this.listProgressSnapshot();
     let progress = this.listProgress(before, after);
     while (!progress.changed && Date.now() < deadline) {
-      await this.page.waitForTimeout(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())));
+      await this.pageOperation(
+        () => this.page.waitForTimeout(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now()))),
+      );
       after = await this.listProgressSnapshot();
       progress = this.listProgress(before, after);
     }
@@ -1089,15 +1286,15 @@ export class PlaywrightLinkedInAdapter {
 
   async hasLoadMore() {
     const controls = this.loadMoreLocator();
-    const count = await controls.count();
+    const count = await this.pageOperation(() => controls.count());
     if (count === 0) return false;
     if (count !== 1) throw new ScanInvariantError('load-more-control-ambiguous');
     const control = controls.first();
-    if (!await control.isVisible()) return false;
-    const nestedInConversation = await control.evaluate(
+    if (!await this.pageOperation(() => control.isVisible())) return false;
+    const nestedInConversation = await this.pageOperation(() => control.evaluate(
       (element, rowSelector) => Boolean(element.closest(rowSelector)),
       ROW_SELECTOR,
-    );
+    ));
     if (nestedInConversation) {
       throw new ScanInvariantError('load-more-control-inside-conversation-row');
     }
@@ -1109,13 +1306,13 @@ export class PlaywrightLinkedInAdapter {
       throw new ScanInvariantError('load-more-control-not-safe');
     }
     const before = await this.listProgressSnapshot();
-    await this.loadMoreLocator().first().click();
+    await this.pageOperation(() => this.loadMoreLocator().first().click());
     return this.waitForListProgress(before);
   }
 
   async scrollList() {
     const before = await this.listProgressSnapshot();
-    const scrollTargetCount = await this.page.evaluate(({ listSelector }) => {
+    const scrollTargetCount = await this.pageOperation(() => this.page.evaluate(({ listSelector }) => {
       const isVisible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -1128,7 +1325,7 @@ export class PlaywrightLinkedInAdapter {
         list.scrollTop = Math.min(list.scrollTop + step, list.scrollHeight - list.clientHeight);
       }
       return lists.length;
-    }, { listSelector: LIST_SELECTOR });
+    }, { listSelector: LIST_SELECTOR }));
     if (scrollTargetCount !== 1) {
       throw new ScanInvariantError('conversation-list-not-uniquely-visible');
     }
@@ -1138,7 +1335,7 @@ export class PlaywrightLinkedInAdapter {
   }
 
   async waitForStability() {
-    await this.page.waitForTimeout(1_000);
+    await this.pageOperation(() => this.page.waitForTimeout(1_000));
   }
 }
 
@@ -1147,16 +1344,50 @@ export async function withPersistentBrowser({
   profilePath,
   onBlocker,
   authTimeoutMs,
+  signal,
   task,
 }) {
-  const context = await chromium.launchPersistentContext(profilePath, {
-    headless: false,
-    viewport: null,
-  });
+  throwIfAborted(signal);
+  let context;
   try {
-    const page = context.pages()[0] || await context.newPage();
-    return await task(new PlaywrightLinkedInAdapter(page, { onBlocker, authTimeoutMs }));
-  } finally {
-    await context.close();
+    context = await chromium.launchPersistentContext(profilePath, {
+      headless: false,
+      viewport: null,
+    });
+  } catch (error) {
+    throwIfAborted(signal);
+    throw error;
   }
+  let closePromise;
+  const closeContext = () => {
+    closePromise ||= Promise.resolve().then(() => context.close());
+    return closePromise;
+  };
+  const onAbort = () => { void closeContext().catch(() => {}); };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  let result;
+  let primaryError;
+  try {
+    throwIfAborted(signal);
+    const page = context.pages()[0] || await context.newPage();
+    throwIfAborted(signal);
+    result = await task(new PlaywrightLinkedInAdapter(page, {
+      onBlocker,
+      authTimeoutMs,
+      signal,
+    }));
+    throwIfAborted(signal);
+  } catch (error) {
+    primaryError = signal?.aborted ? signal.reason : error;
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+    try {
+      await closeContext();
+    } catch {
+      if (!primaryError) primaryError = new Error('Browser cleanup failed.');
+    }
+  }
+  if (signal?.aborted) throw signal.reason;
+  if (primaryError) throw primaryError;
+  return result;
 }

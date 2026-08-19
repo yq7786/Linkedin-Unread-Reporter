@@ -226,6 +226,7 @@ test('new scan safety codes reconstruct static messages and ignore mutated messa
     'conversation-row-url-changed',
     'candidate-revalidation-failed',
     'conversation-list-progress-invalid',
+    'conversation-open-row-mismatch',
   ]) {
     const error = new ScanInvariantError(code);
     error.message = 'Private Person {"content":"private thread"}';
@@ -388,12 +389,18 @@ test('performBrowserLogin navigates and waits without reading conversation rows'
 
 test('performBrowserCapture supplies a real adapter to message capture', async () => {
   const adapter = { marker: 'adapter' };
-  const captureOptions = { outbox: { version: 1, entries: [] }, captureNew: true };
+  const controller = new AbortController();
+  const captureOptions = {
+    outbox: { version: 1, entries: [] },
+    captureNew: true,
+    signal: controller.signal,
+  };
   const result = await requiredExport('performBrowserCapture')(config, captureOptions, {
     chromiumImpl: { marker: 'chromium' },
     withBrowserImpl: async (options) => {
       assert.equal(options.profilePath, config.browserProfilePath);
       assert.equal(options.chromium.marker, 'chromium');
+      assert.equal(options.signal, controller.signal);
       return options.task(adapter);
     },
     captureImpl: async (options) => {
