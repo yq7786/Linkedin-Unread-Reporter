@@ -2,7 +2,7 @@
   "name": "linkedin-unread-reporter",
   "version": "0.1.0",
   "private": true,
-  "description": "Read-only LinkedIn unread conversation reports delivered to Slack.",
+  "description": "Durable LinkedIn unread message ingestion for a private portal.",
   "type": "module",
   "engines": {
     "node": ">=18"
@@ -13,7 +13,7 @@
     "configure": "node src/cli.js configure",
     "login": "node src/cli.js login",
     "scan": "node src/cli.js scan",
-    "slack-test": "node src/cli.js slack-test",
+    "deliver": "node src/cli.js deliver",
     "report": "node src/cli.js scheduled-report"
   },
   "dependencies": {
