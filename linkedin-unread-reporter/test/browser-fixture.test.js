@@ -102,8 +102,12 @@ browserTest('openConversation prefers a validated direct URL and uses only the e
   assert.equal(page.url(), 'https://www.linkedin.com/messaging/thread/thread-1/');
 
   await adapter.gotoUnread(unreadUrl);
-  await adapter.openConversation(candidates[1]);
+  let checkpointedUrl = null;
+  await adapter.openConversation(candidates[1], {
+    onOpened: async (url) => { checkpointedUrl = url; },
+  });
   assert.match(page.url(), /\/messaging\/thread\/thread-2\/$/);
+  assert.equal(checkpointedUrl, 'https://www.linkedin.com/messaging/thread/thread-2/');
 });
 
 browserTest('anchorless opening fails closed unless exactly one visible matching row is still unread', async (page) => {

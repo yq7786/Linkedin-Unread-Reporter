@@ -292,6 +292,53 @@ test('openConversation re-enters the requested thread even if manual recovery la
   assert.deepEqual(gotoCalls, [requestedUrl, requestedUrl]);
 });
 
+test('openConversation checkpoints a canonical URL before waiting for thread readiness', async () => {
+  const events = [];
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/checkpoint-order/';
+  const page = {
+    goto: async () => events.push('navigate'),
+    url: () => threadUrl,
+    evaluate: async () => {
+      events.push('readiness');
+      return { url: threadUrl, threadCount: 1 };
+    },
+  };
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    recoveryOptions: { pollIntervalMs: 0, sleep: async () => {} },
+  });
+
+  await adapter.openConversation(
+    { conversationUrl: threadUrl },
+    { onOpened: async (url) => events.push(`checkpoint:${url}`) },
+  );
+
+  assert.deepEqual(events.slice(0, 3), ['navigate', `checkpoint:${threadUrl}`, 'readiness']);
+});
+
+test('openConversation sanitizes checkpoint callback failures and stops before readiness', async () => {
+  const privateFailure = 'private outbox path failed';
+  let readinessCalls = 0;
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/checkpoint-failure/';
+  const adapter = new PlaywrightLinkedInAdapter({
+    goto: async () => {},
+    url: () => threadUrl,
+    evaluate: async () => {
+      readinessCalls += 1;
+      return { url: threadUrl, threadCount: 1 };
+    },
+  });
+
+  await assert.rejects(
+    adapter.openConversation(
+      { conversationUrl: threadUrl },
+      { onOpened: async () => { throw new Error(privateFailure); } },
+    ),
+    (error) => error.code === 'conversation-open-checkpoint-failed'
+      && !error.message.includes(privateFailure),
+  );
+  assert.equal(readinessCalls, 0);
+});
+
 test('openConversation sanitizes browser failures that contain private URLs and row identities', async () => {
   const privateUrl = 'https://www.linkedin.com/messaging/thread/private-thread-id/';
   const directAdapter = new PlaywrightLinkedInAdapter({

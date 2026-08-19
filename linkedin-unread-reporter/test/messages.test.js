@@ -4,10 +4,32 @@ import test from 'node:test';
 import {
   createIdempotencyKey,
   normalizeLeadName,
+  normalizeIsoTimestamp,
   normalizeVisibleText,
   selectUnreadInboundMessages,
   validateConversationUrl,
 } from '../src/messages.js';
+
+test('normalizeIsoTimestamp requires and canonicalizes a valid ISO timestamp', () => {
+  assert.equal(
+    normalizeIsoTimestamp('2026-08-19T12:05:00+10:00'),
+    '2026-08-19T02:05:00.000Z',
+  );
+  for (const value of [
+    null,
+    42,
+    'August 19, 2026',
+    '2026-02-30T02:05:00Z',
+    '2026-08-19T24:00:00Z',
+  ]) {
+    assert.throws(
+      () => normalizeIsoTimestamp(value),
+      (error) => error instanceof Error
+        && error.name === 'MessageDataError'
+        && error.code === 'sent-at-invalid',
+    );
+  }
+});
 
 test('validateConversationUrl accepts only LinkedIn thread URLs and returns the canonical URL', () => {
   const canonical = 'https://www.linkedin.com/messaging/thread/opaque-id/';

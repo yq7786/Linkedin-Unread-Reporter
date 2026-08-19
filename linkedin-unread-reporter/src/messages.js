@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export class MessageDataError extends Error {
   constructor(code) {
@@ -34,6 +34,22 @@ export function normalizeVisibleText(value) {
   if (typeof value !== 'string') invalid('visible-content-invalid');
   const normalized = value.replace(/\r\n?/g, '\n').trim();
   if (!normalized) invalid('visible-content-invalid');
+  return normalized;
+}
+
+export function normalizeIsoTimestamp(value) {
+  const match = typeof value === 'string' ? ISO_TIMESTAMP.exec(value) : null;
+  if (!match
+    || !hasValidCalendarDate(match)
+    || Number(match[4]) > 23
+    || Number(match[5]) > 59
+    || Number(match[6]) > 59) invalid('sent-at-invalid');
+  let normalized;
+  try {
+    normalized = new Date(value).toISOString();
+  } catch {
+    invalid('sent-at-invalid');
+  }
   return normalized;
 }
 
@@ -102,16 +118,7 @@ export function createIdempotencyKey({ linkedinMessageId, leadName, sentAt, conv
     return `linkedin:${linkedinMessageId.trim()}`;
   }
 
-  const timestampMatch = typeof sentAt === 'string' ? ISO_TIMESTAMP.exec(sentAt) : null;
-  if (!timestampMatch || !hasValidCalendarDate(timestampMatch)) {
-    invalid('sent-at-invalid');
-  }
-  let canonicalTimestamp;
-  try {
-    canonicalTimestamp = new Date(sentAt).toISOString();
-  } catch {
-    invalid('sent-at-invalid');
-  }
+  const canonicalTimestamp = normalizeIsoTimestamp(sentAt);
 
   const canonical = JSON.stringify([
     normalizeLeadName(leadName),

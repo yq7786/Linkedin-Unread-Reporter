@@ -463,7 +463,7 @@ export class PlaywrightLinkedInAdapter {
     }
   }
 
-  async openConversation({ rowId, conversationUrl }) {
+  async openConversation({ rowId, conversationUrl }, { onOpened } = {}) {
     try {
       const hasConversationUrl = conversationUrl !== null && conversationUrl !== undefined;
       const canonicalUrl = hasConversationUrl ? validateConversationUrl(conversationUrl) : null;
@@ -501,6 +501,21 @@ export class PlaywrightLinkedInAdapter {
         });
         if (!stillUnread) throw new ScanInvariantError('conversation-row-no-longer-unread');
         await rows.first().click();
+      }
+
+      if (onOpened !== undefined) {
+        if (typeof onOpened !== 'function') {
+          throw new ScanInvariantError('conversation-open-checkpoint-invalid');
+        }
+        const openedUrl = validateConversationUrl(this.page.url());
+        if (canonicalUrl && openedUrl !== canonicalUrl) {
+          throw new ScanInvariantError('conversation-url-mismatch');
+        }
+        try {
+          await onOpened(openedUrl);
+        } catch {
+          throw new ScanInvariantError('conversation-open-checkpoint-failed');
+        }
       }
 
       await waitForManualRecovery({
