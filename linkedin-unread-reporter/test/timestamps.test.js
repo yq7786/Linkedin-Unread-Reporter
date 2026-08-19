@@ -28,6 +28,11 @@ const timestampPending = {
 };
 
 const outbox = { version: 1, entries: [timestampPending] };
+const workId = '11111111-1111-4111-8111-111111111111';
+
+function timestampResult(items, resultWorkId = workId) {
+  return { version: 1, workId: resultWorkId, items };
+}
 
 async function withTempDirectory(callback) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-timestamps-'));
@@ -39,10 +44,11 @@ async function withTempDirectory(callback) {
 }
 
 test('buildTimestampWork exposes only temporary keys, labels, and scan anchors', () => {
-  const work = buildTimestampWork(outbox, { attempt: 1 });
+  const work = buildTimestampWork(outbox, { attempt: 1, generateWorkId: () => workId });
   assert.deepEqual(work, {
     version: 1,
     attempt: 1,
+    workId,
     items: [{
       itemKey: 'timestamp-1',
       relativeTime: '2h',
@@ -50,6 +56,22 @@ test('buildTimestampWork exposes only temporary keys, labels, and scan anchors',
     }],
   });
   assert.doesNotMatch(JSON.stringify(work), /Ada|Hello|messaging\/thread/);
+});
+
+test('buildTimestampWork creates a fresh opaque work id for every normalization attempt', () => {
+  const workIds = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+  ];
+  const generateWorkId = () => workIds.shift();
+
+  const first = buildTimestampWork(outbox, { attempt: 1, generateWorkId });
+  const second = buildTimestampWork(outbox, { attempt: 2, generateWorkId });
+
+  assert.equal(first.workId, '11111111-1111-4111-8111-111111111111');
+  assert.equal(second.workId, '22222222-2222-4222-8222-222222222222');
+  assert.notEqual(first.workId, second.workId);
+  assert.doesNotMatch(JSON.stringify([first, second]), /Ada|Hello|messaging\/thread/);
 });
 
 test('buildTimestampWork supports exactly three timestamp attempts', () => {
@@ -75,7 +97,7 @@ test('buildTimestampWork replaces private entry ids with deterministic opaque ke
       },
     ],
   };
-  const work = buildTimestampWork(value, { attempt: 1 });
+  const work = buildTimestampWork(value, { attempt: 1, generateWorkId: () => workId });
   assert.deepEqual(work.items, [
     {
       itemKey: 'timestamp-1',
@@ -90,13 +112,10 @@ test('buildTimestampWork replaces private entry ids with deterministic opaque ke
   ]);
   assert.doesNotMatch(JSON.stringify(work), /private-|Ada|Hello|Grace|Content|linkedin\.com/);
 
-  const next = applyTimestampResults(value, {
-    version: 1,
-    items: [
+  const next = applyTimestampResults(value, timestampResult([
       { itemKey: 'timestamp-1', sentAt: '2026-08-19T02:45:00.000Z' },
       { itemKey: 'timestamp-2', sentAt: '2026-08-19T01:00:00.000Z' },
-    ],
-  });
+  ]), { workId });
   assert.equal(next.entries[0].sentAt, '2026-08-19T01:00:00.000Z');
   assert.equal(next.entries[1].sentAt, '2026-08-19T02:45:00.000Z');
 });
@@ -125,11 +144,10 @@ test('convertRelativeTime returns null for unsupported labels and rejects invali
 });
 
 test('applyTimestampResults promotes exact pending coverage and rejects stale replay', () => {
-  const result = {
-    version: 1,
-    items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-  };
-  const next = applyTimestampResults(outbox, result);
+  const result = timestampResult([
+    { itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' },
+  ]);
+  const next = applyTimestampResults(outbox, result, { workId });
   assert.deepEqual(Object.keys(next.entries[0]).sort(), [
     'content', 'contentType', 'conversationUrl', 'entryId', 'idempotencyKey', 'leadName',
     'linkedinMessageId', 'sentAt', 'sentAtAccuracy', 'sentAtRaw', 'state',
@@ -138,28 +156,61 @@ test('applyTimestampResults promotes exact pending coverage and rejects stale re
   assert.equal(next.entries[0].sentAtAccuracy, 'estimated');
   assert.equal(next.entries[0].sentAt, '2026-08-19T01:00:00.000Z');
   assert.match(next.entries[0].idempotencyKey, /^sha256:[a-f0-9]{64}$/);
-  assert.throws(() => applyTimestampResults(next, result), /invalid/i);
-  assert.equal(applyTimestampResults(next, { version: 1, items: [] }), next);
+  assert.throws(() => applyTimestampResults(next, result, { workId }), /invalid/i);
+  assert.equal(applyTimestampResults(next, timestampResult([]), { workId }), next);
   assert.equal(outbox.entries[0].state, 'timestamp_pending');
+});
+
+test('applyTimestampResults rejects an equal-sized valid result left by a previous run', () => {
+  const currentWork = buildTimestampWork(outbox, {
+    attempt: 1,
+    generateWorkId: () => '22222222-2222-4222-8222-222222222222',
+  });
+  const staleResult = {
+    version: 1,
+    workId: '11111111-1111-4111-8111-111111111111',
+    items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
+  };
+
+  assert.throws(
+    () => applyTimestampResults(outbox, staleResult, { workId: currentWork.workId }),
+    /invalid/i,
+  );
+  assert.equal(outbox.entries[0].state, 'timestamp_pending');
+});
+
+test('applyTimestampResults rejects missing, malformed, and mismatched work ids', () => {
+  const expectedWorkId = '22222222-2222-4222-8222-222222222222';
+  const items = [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }];
+  for (const result of [
+    { version: 1, items },
+    { version: 1, workId: 'not-a-work-id', items },
+    { version: 1, workId: '11111111-1111-4111-8111-111111111111', items },
+  ]) {
+    assert.throws(
+      () => applyTimestampResults(outbox, result, { workId: expectedWorkId }),
+      /invalid/i,
+    );
+  }
 });
 
 test('applyTimestampResults rejects malformed schemas, duplicate keys, and non-exact coverage safely', () => {
   const invalidResults = [
-    { version: 1, items: [] },
-    { version: 2, items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }] },
-    { version: 1, items: [{ itemKey: 'entry-private-unknown', sentAt: '2026-08-19T01:00:00.000Z' }] },
-    { version: 1, items: [
+    timestampResult([]),
+    { version: 2, workId, items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }] },
+    timestampResult([{ itemKey: 'entry-private-unknown', sentAt: '2026-08-19T01:00:00.000Z' }]),
+    timestampResult([
       { itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' },
       { itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' },
-    ] },
-    { version: 1, items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00Z' }] },
-    { version: 1, items: [{ itemKey: 'timestamp-1', sentAt: 'private-invalid-time' }] },
-    { version: 1, items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z', extra: true }] },
-    { version: 1, items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }], extra: true },
+    ]),
+    timestampResult([{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00Z' }]),
+    timestampResult([{ itemKey: 'timestamp-1', sentAt: 'private-invalid-time' }]),
+    timestampResult([{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z', extra: true }]),
+    { ...timestampResult([{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }]), extra: true },
   ];
   for (const result of invalidResults) {
     assert.throws(
-      () => applyTimestampResults(outbox, result),
+      () => applyTimestampResults(outbox, result, { workId }),
       (error) => /invalid/i.test(error.message)
         && !/entry-private|private-invalid/.test(error.message),
     );
@@ -179,13 +230,10 @@ test('applyTimestampResults rejects colliding fallback idempotency keys without 
     ],
   };
   const original = structuredClone(collidingOutbox);
-  assert.throws(() => applyTimestampResults(collidingOutbox, {
-    version: 1,
-    items: [
+  assert.throws(() => applyTimestampResults(collidingOutbox, timestampResult([
       { itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' },
       { itemKey: 'timestamp-2', sentAt: '2026-08-19T01:00:00.000Z' },
-    ],
-  }), (error) => /invalid/i.test(error.message)
+  ]), { workId }), (error) => /invalid/i.test(error.message)
     && !/Ada|Different|entry-/.test(error.message));
   assert.deepEqual(collidingOutbox, original);
 });
@@ -198,20 +246,17 @@ test('applyTimestampResults rejects multi-item subsets and stale results when no
       { ...timestampPending, entryId: 'entry-2', linkedinMessageId: 'message-2' },
     ],
   };
-  assert.throws(() => applyTimestampResults(twoPending, {
-    version: 1,
-    items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-  }), /invalid/i);
+  assert.throws(() => applyTimestampResults(twoPending, timestampResult([
+    { itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' },
+  ]), { workId }), /invalid/i);
   assert.equal(twoPending.entries.every(({ state }) => state === 'timestamp_pending'), true);
 
-  const readyOutbox = applyTimestampResults(outbox, {
-    version: 1,
-    items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-  });
-  assert.throws(() => applyTimestampResults(readyOutbox, {
-    version: 1,
-    items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-  }), /invalid/i);
+  const readyOutbox = applyTimestampResults(outbox, timestampResult([
+    { itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' },
+  ]), { workId });
+  assert.throws(() => applyTimestampResults(readyOutbox, timestampResult([
+    { itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' },
+  ]), { workId }), /invalid/i);
 });
 
 test('applyLocalTimestampFallback promotes supported labels and leaves unsupported labels pending', () => {
@@ -303,11 +348,12 @@ test('waitForTimestampResults polls for and validates a private atomic result si
   await withTempDirectory(async (directory) => {
     const resultPath = path.join(directory, 'results.json');
     const temporaryPath = `${resultPath}.tmp-agent`;
-    const result = {
-      version: 1,
-      items: [{ itemKey: 'entry-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-    };
-    const pending = waitForTimestampResults({ resultPath, timeoutMs: 500, pollIntervalMs: 1 });
+    const result = timestampResult([
+      { itemKey: 'entry-1', sentAt: '2026-08-19T01:00:00.000Z' },
+    ]);
+    const pending = waitForTimestampResults({
+      resultPath, workId, timeoutMs: 500, pollIntervalMs: 1,
+    });
     await fs.writeFile(temporaryPath, JSON.stringify(result), { mode: 0o600 });
     await fs.rename(temporaryPath, resultPath);
     assert.deepEqual(await pending, result);
@@ -319,24 +365,23 @@ test('waitForTimestampResults rejects timeouts and malformed or non-private resu
   await withTempDirectory(async (directory) => {
     const missingPath = path.join(directory, 'private-missing-result.json');
     await assert.rejects(
-      waitForTimestampResults({ resultPath: missingPath, timeoutMs: 3, pollIntervalMs: 1 }),
+      waitForTimestampResults({ resultPath: missingPath, workId, timeoutMs: 3, pollIntervalMs: 1 }),
       (error) => /timed out/i.test(error.message) && !error.message.includes(missingPath),
     );
 
     const resultPath = path.join(directory, 'result.json');
-    await fs.writeFile(resultPath, JSON.stringify({
-      version: 1,
-      items: [{ itemKey: 'entry-private', sentAt: 'private-time' }],
-    }), { mode: 0o600 });
+    await fs.writeFile(resultPath, JSON.stringify(timestampResult([
+      { itemKey: 'entry-private', sentAt: 'private-time' },
+    ])), { mode: 0o600 });
     await assert.rejects(
-      waitForTimestampResults({ resultPath, timeoutMs: 20, pollIntervalMs: 1 }),
+      waitForTimestampResults({ resultPath, workId, timeoutMs: 20, pollIntervalMs: 1 }),
       (error) => /invalid/i.test(error.message) && !/entry-private|private-time/.test(error.message),
     );
 
-    await fs.writeFile(resultPath, JSON.stringify({ version: 1, items: [] }), { mode: 0o644 });
+    await fs.writeFile(resultPath, JSON.stringify(timestampResult([])), { mode: 0o644 });
     await fs.chmod(resultPath, 0o644);
     await assert.rejects(
-      waitForTimestampResults({ resultPath, timeoutMs: 20, pollIntervalMs: 1 }),
+      waitForTimestampResults({ resultPath, workId, timeoutMs: 20, pollIntervalMs: 1 }),
       /permissions.*invalid/i,
     );
   });
@@ -359,6 +404,7 @@ test('waitForTimestampResults stops immediately when the lock aborts during poll
 
   const pending = waitForTimestampResults({
     resultPath: '/private/result.json',
+    workId,
     timeoutMs: 5,
     pollIntervalMs: 1,
     fileSystem,
@@ -380,6 +426,7 @@ test('waitForTimestampResults closes a handle acquired as the lock becomes compr
 
   await assert.rejects(waitForTimestampResults({
     resultPath: '/private/result.json',
+    workId,
     timeoutMs: 20,
     signal: controller.signal,
     fileSystem: {
@@ -395,7 +442,7 @@ test('waitForTimestampResults closes a handle acquired as the lock becomes compr
 
 test('waitForTimestampResults uses one no-follow read handle and validates the same file', async () => {
   const calls = [];
-  const result = { version: 1, items: [] };
+  const result = timestampResult([]);
   const stat = { isFile: () => true, mode: 0o100600, dev: 7, ino: 11 };
   const handle = {
     stat: async () => { calls.push(['handle.stat']); return stat; },
@@ -408,6 +455,7 @@ test('waitForTimestampResults uses one no-follow read handle and validates the s
   };
   assert.deepEqual(await waitForTimestampResults({
     resultPath: '/private/result.json',
+    workId,
     timeoutMs: 20,
     fileSystem,
   }), result);
@@ -424,10 +472,10 @@ test('waitForTimestampResults rejects symlinks and replacement races without exp
   await withTempDirectory(async (directory) => {
     const targetPath = path.join(directory, 'target-private.json');
     const resultPath = path.join(directory, 'result-private.json');
-    await fs.writeFile(targetPath, JSON.stringify({ version: 1, items: [] }), { mode: 0o600 });
+    await fs.writeFile(targetPath, JSON.stringify(timestampResult([])), { mode: 0o600 });
     await fs.symlink(targetPath, resultPath);
     await assert.rejects(
-      waitForTimestampResults({ resultPath, timeoutMs: 20, pollIntervalMs: 1 }),
+      waitForTimestampResults({ resultPath, workId, timeoutMs: 20, pollIntervalMs: 1 }),
       (error) => /read failed/i.test(error.message) && !error.message.includes(resultPath),
     );
   });
@@ -436,11 +484,12 @@ test('waitForTimestampResults rejects symlinks and replacement races without exp
   const replacementStat = { isFile: () => true, mode: 0o100600, dev: 7, ino: 12 };
   await assert.rejects(waitForTimestampResults({
     resultPath: '/private/replaced-result.json',
+    workId,
     timeoutMs: 20,
     fileSystem: {
       open: async () => ({
         stat: async () => openedStat,
-        readFile: async () => JSON.stringify({ version: 1, items: [] }),
+        readFile: async () => JSON.stringify(timestampResult([])),
         close: async () => {},
       }),
       lstat: async () => replacementStat,
@@ -452,6 +501,7 @@ test('waitForTimestampResults closes its handle while preserving the primary rea
   const calls = [];
   await assert.rejects(waitForTimestampResults({
     resultPath: '/private/result.json',
+    workId,
     timeoutMs: 20,
     fileSystem: {
       open: async () => ({

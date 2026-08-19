@@ -101,6 +101,7 @@ function timestampNotifier(config, logs) {
     const temporaryPath = `${config.timestampResultPath}.fixture-tmp`;
     const result = {
       version: 1,
+      workId: work.workId,
       items: work.items.map(({ itemKey }) => ({
         itemKey,
         sentAt: '2026-08-19T02:06:00.000Z',

@@ -39,6 +39,7 @@ If any marker is missing, stop immediately before installing dependencies or tak
 - Fail closed if the Unread filter is not active, row identity or unread state is ambiguous, the wrong thread opens, or message content, direction, boundary, or timestamp cannot be determined safely.
 - Treat `.linkedin-unread-outbox.json` as a private durable outbox. It contains names, message content, thread URLs, and delivery state, must remain mode `0600`, and must never be read or summarized by Codex or a timestamp subagent. Direct-URL recovery is durable before opening; anchorless recovery becomes durable in `onOpened` immediately after URL validation and before extraction; completed extraction is then checkpointed immediately.
 - Keep `.env`, `.linkedin-browser-profile/`, `.linkedin-unread-outbox.json`, `.linkedin-timestamp-work.json`, `.linkedin-timestamp-results.json`, and their temporary/lock files local and gitignored. Never expose their sensitive fields in logs, prompts, or task output.
+- For timestamp normalization, require the result to copy the current work sidecar's opaque top-level `workId` and every `itemKey` verbatim; never reuse values from a prior attempt, invent them, or alter them.
 - Keep output count-only: processed conversations, captured messages, Portal result counts, pending recovery, and pending timestamp counts are allowed. Names, message content, thread URLs, timestamps, credentials, cookies, and sidecar contents are not.
 
 ## Scheduling

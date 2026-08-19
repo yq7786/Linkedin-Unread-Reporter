@@ -6,6 +6,7 @@ import {
   applyLocalTimestampFallback,
   applyTimestampResults,
   buildTimestampWork,
+  removeTimestampResult,
   removeTimestampSidecars,
   waitForTimestampResults,
   writeTimestampWork,
@@ -138,7 +139,9 @@ export async function runPortalWorkflow({
   writeWork = writeTimestampWork,
   waitForResults = waitForTimestampResults,
   removeSidecars = removeTimestampSidecars,
+  removeResult = removeTimestampResult,
   notifyTimestampWork = () => {},
+  generateTimestampWorkId,
   now = () => new Date(),
 }) {
   if (typeof capture !== 'function') {
@@ -213,7 +216,20 @@ export async function runPortalWorkflow({
 
         for (let attempt = 1; attempt <= MAX_TIMESTAMP_ATTEMPTS; attempt += 1) {
           checkpoint(signal);
-          const work = buildTimestampWork(outbox, { attempt });
+          try {
+            await checkedAwait(signal, () => removeResult({
+              resultPath: config.timestampResultPath,
+            }));
+          } catch (error) {
+            await cleanupPreservingPrimary(signal, error, () => removeSidecars({
+              workPath: config.timestampWorkPath,
+              resultPath: config.timestampResultPath,
+            }));
+          }
+          const work = buildTimestampWork(outbox, {
+            attempt,
+            ...(generateTimestampWorkId ? { generateWorkId: generateTimestampWorkId } : {}),
+          });
           try {
             await checkedAwait(signal, () => writeWork({
               workPath: config.timestampWorkPath,
@@ -232,11 +248,12 @@ export async function runPortalWorkflow({
           try {
             const result = await checkedAwait(signal, () => waitForResults({
               resultPath: config.timestampResultPath,
+              workId: work.workId,
               timeoutMs: config.authTimeoutMs,
               signal,
             }));
             checkpoint(signal);
-            normalized = applyTimestampResults(outbox, result);
+            normalized = applyTimestampResults(outbox, result, { workId: work.workId });
             checkpoint(signal);
           } catch (error) {
             await cleanupPreservingPrimary(signal, error, () => removeSidecars({

@@ -135,6 +135,9 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.match(timestampPrompt, /\.linkedin-timestamp-results\.json/);
   assert.match(timestampPrompt, /relativeTime/);
   assert.match(timestampPrompt, /scanStartedAt/);
+  assert.match(timestampPrompt, /copy the top-level input workId\s+verbatim/i);
+  assert.match(timestampPrompt, /never invent[^\n]+workId/i);
+  assert.match(timestampPrompt, /"workId":"<WORK-ID>"/);
   assert.match(timestampPrompt, /copy each input itemKey verbatim/i);
   assert.match(timestampPrompt, /never invent[^\n]+itemKey/i);
   assert.match(timestampPrompt, /"itemKey":"timestamp-N"/);

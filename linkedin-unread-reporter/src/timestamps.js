@@ -1,6 +1,7 @@
 import { constants as fsConstants } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 import { createIdempotencyKey } from './messages.js';
 import { validateOutbox } from './outbox.js';
@@ -53,8 +54,13 @@ export async function removeTimestampSidecars({ workPath, resultPath, fileSystem
   ]);
 }
 
+export async function removeTimestampResult({ resultPath, fileSystem = fs }) {
+  await fileSystem.rm(resultPath, { force: true });
+}
+
 export async function waitForTimestampResults({
   resultPath,
+  workId,
   timeoutMs,
   pollIntervalMs = 1_000,
   fileSystem = fs,
@@ -62,6 +68,7 @@ export async function waitForTimestampResults({
 }) {
   if (typeof resultPath !== 'string'
     || !resultPath
+    || !isWorkId(workId)
     || !Number.isFinite(timeoutMs)
     || timeoutMs < 0
     || !Number.isFinite(pollIntervalMs)
@@ -105,7 +112,7 @@ export async function waitForTimestampResults({
         } catch {
           invalid();
         }
-        validateTimestampResult(result);
+        validateTimestampResult(result, workId);
       } catch (error) {
         primaryError = signal?.aborted ? signal.reason : [
           'Timestamp data is invalid.',
@@ -158,11 +165,12 @@ async function syncParentDirectory({ targetPath, fileSystem }) {
 
 function validateTimestampWork(work) {
   if (!isRecord(work)
-    || Object.keys(work).length !== 3
+    || Object.keys(work).length !== 4
     || work.version !== 1
     || !Number.isInteger(work.attempt)
     || work.attempt < 1
     || work.attempt > 3
+    || !isWorkId(work.workId)
     || !Array.isArray(work.items)) invalid();
   const keys = new Set();
   for (const item of work.items) {
@@ -226,6 +234,11 @@ function isCanonicalIsoTimestamp(value) {
   return !Number.isNaN(date.valueOf()) && date.toISOString() === value;
 }
 
+function isWorkId(value) {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
 function toReadyEntry(entry, sentAt) {
   const { scanStartedAt: _scanStartedAt, ...fields } = entry;
   const ready = {
@@ -253,10 +266,12 @@ function validateUniqueReadyIdempotencyKeys(outbox) {
   return outbox;
 }
 
-function validateTimestampResult(result) {
+function validateTimestampResult(result, expectedWorkId) {
   if (!isRecord(result)
-    || Object.keys(result).length !== 2
+    || Object.keys(result).length !== 3
     || result.version !== 1
+    || !isWorkId(result.workId)
+    || result.workId !== expectedWorkId
     || !Array.isArray(result.items)) invalid();
   const items = new Map();
   for (const item of result.items) {
@@ -279,9 +294,10 @@ function buildPendingTimestampMapping(outbox) {
     .map((entry, index) => ({ entry, itemKey: `timestamp-${index + 1}` }));
 }
 
-export function applyTimestampResults(outbox, result) {
+export function applyTimestampResults(outbox, result, { workId } = {}) {
   validateOutbox(outbox);
-  const resultItems = validateTimestampResult(result);
+  if (!isWorkId(workId)) invalid();
+  const resultItems = validateTimestampResult(result, workId);
   const pendingMapping = buildPendingTimestampMapping(outbox);
   if (resultItems.size !== pendingMapping.length
     || pendingMapping.some(({ itemKey }) => !resultItems.has(itemKey))) invalid();
@@ -338,14 +354,18 @@ export function convertRelativeTime(relativeTime, scanStartedAt) {
   return Number.isNaN(converted.valueOf()) ? null : converted.toISOString();
 }
 
-export function buildTimestampWork(outbox, { attempt }) {
+export function buildTimestampWork(outbox, { attempt, generateWorkId = randomUUID }) {
   validateOutbox(outbox);
   if (!Number.isInteger(attempt) || attempt < 1 || attempt > 3) {
     throw new Error('Timestamp attempt is invalid.');
   }
+  if (typeof generateWorkId !== 'function') invalid();
+  const workId = generateWorkId();
+  if (!isWorkId(workId)) invalid();
   return {
     version: 1,
     attempt,
+    workId,
     items: buildPendingTimestampMapping(outbox)
       .map(({ entry, itemKey }) => ({
         itemKey,

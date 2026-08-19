@@ -42,14 +42,15 @@ Give the subagent exactly this task:
 
 ```text
 Work only in the installed linkedin-unread-reporter skill directory. Read the private
-.linkedin-timestamp-work.json file. Each item contains only itemKey, relativeTime, and
-scanStartedAt fields. Convert every relativeTime to an ISO-8601 sentAt value using
-its scanStartedAt anchor. Copy each input itemKey verbatim into the matching result;
-never invent, renumber, normalize, or otherwise change an itemKey. Atomically write mode-`0600`
+.linkedin-timestamp-work.json file. It contains one opaque top-level workId; each item
+contains only itemKey, relativeTime, and scanStartedAt fields. Convert every relativeTime
+to an ISO-8601 sentAt value using its scanStartedAt anchor. Copy the top-level input workId
+verbatim into the result and copy each input itemKey verbatim into the matching result;
+never invent, renumber, normalize, or otherwise change a workId or itemKey. Atomically write mode-`0600`
 .linkedin-timestamp-results.json with this value-free schema:
-{"version":1,"items":[{"itemKey":"timestamp-N","sentAt":"<ISO-8601>"}]}. Here timestamp-N means
-the unchanged input itemKey and <ISO-8601> means the computed value; do not write either
-placeholder literally. Do not read the
+{"version":1,"workId":"<WORK-ID>","items":[{"itemKey":"timestamp-N","sentAt":"<ISO-8601>"}]}.
+Here <WORK-ID> and timestamp-N mean the unchanged input values and <ISO-8601> means the
+computed value; do not write any placeholder literally. Do not read the
 outbox, browser profile, .env, lead names, message content, or LinkedIn URLs. Return
 only the number of converted items.
 ```

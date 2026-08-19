@@ -15,6 +15,7 @@ const config = {
   portalWebhookUrl: 'https://portal.example.test/hooks/linkedin',
   portalCallSecret: 'private-call-secret',
 };
+const workId = '11111111-1111-4111-8111-111111111111';
 
 const emptyOutbox = () => ({ version: 1, entries: [] });
 const emptyDelivery = (outbox) => {
@@ -76,8 +77,12 @@ function dependencies(overrides = {}) {
         pendingTimestamps: 0,
       }),
       writeWork: async () => {},
-      waitForResults: async () => ({ version: 1, items: [] }),
+      waitForResults: async ({ workId: expectedWorkId }) => ({
+        version: 1, workId: expectedWorkId, items: [],
+      }),
       removeSidecars: async () => {},
+      removeResult: async () => {},
+      generateTimestampWorkId: () => workId,
       now: () => new Date('2026-08-19T03:00:00.000Z'),
       ...overrides,
     },
@@ -154,9 +159,9 @@ test('workflow retries invalid timestamp results three times, cleans sidecars, t
     captureNew: false,
     writeWork: async ({ work }) => events.push(`write-${work.attempt}`),
     notifyTimestampWork: (event) => notifications.push(event),
-    waitForResults: async () => {
+    waitForResults: async ({ workId: expectedWorkId }) => {
       events.push('wait');
-      return { version: 1, items: [] };
+      return { version: 1, workId: expectedWorkId, items: [] };
     },
     removeSidecars: async () => events.push('cleanup'),
   });
@@ -175,6 +180,55 @@ test('workflow retries invalid timestamp results three times, cleans sidecars, t
   ]);
   assert.equal(saved.some(({ entries }) => entries[0]?.state === 'ready'), true);
   assert.equal(result.pendingTimestamps, 0);
+});
+
+test('workflow removes stale timestamp results before publishing every unique attempt', async () => {
+  const events = [];
+  const workIds = [
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+  ];
+  const { options } = dependencies({
+    initialOutbox: { version: 1, entries: [timestampEntry()] },
+    captureNew: false,
+    generateTimestampWorkId: () => workIds.shift(),
+    removeResult: async () => events.push('remove-result'),
+    writeWork: async ({ work }) => events.push(`write-${work.workId}`),
+    waitForResults: async ({ workId: expectedWorkId }) => {
+      events.push('wait');
+      return { version: 1, workId: expectedWorkId, items: [] };
+    },
+    removeSidecars: async () => events.push('cleanup'),
+  });
+
+  await runPortalWorkflow(options);
+
+  assert.deepEqual(events, [
+    'remove-result', 'write-11111111-1111-4111-8111-111111111111', 'wait', 'cleanup',
+    'remove-result', 'write-22222222-2222-4222-8222-222222222222', 'wait', 'cleanup',
+    'remove-result', 'write-33333333-3333-4333-8333-333333333333', 'wait', 'cleanup',
+  ]);
+});
+
+test('workflow preserves stale-result removal errors and cleans up before publishing', async () => {
+  const primaryError = new Error('Timestamp stale result removal failed.');
+  let writes = 0;
+  let cleanups = 0;
+  const { options } = dependencies({
+    initialOutbox: { version: 1, entries: [timestampEntry()] },
+    captureNew: false,
+    removeResult: async () => { throw primaryError; },
+    writeWork: async () => { writes += 1; },
+    removeSidecars: async () => {
+      cleanups += 1;
+      throw new Error('Timestamp sidecar cleanup failed.');
+    },
+  });
+
+  await assert.rejects(runPortalWorkflow(options), (error) => error === primaryError);
+  assert.equal(writes, 0);
+  assert.equal(cleanups, 1);
 });
 
 test('unsupported fallback remains durable and fails count-only before portal delivery', async () => {
@@ -291,10 +345,11 @@ test('workflow runs delivery, recovery, existing timestamps, discovery, new time
       };
     },
     writeWork: async ({ work }) => events.push(`work-${work.items.length}`),
-    waitForResults: async () => {
+    waitForResults: async ({ workId: expectedWorkId }) => {
       events.push('timestamps');
       return {
         version: 1,
+        workId: expectedWorkId,
         items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
       };
     },
@@ -363,8 +418,9 @@ test('workflow saves a valid timestamp transition before sidecar cleanup failure
       events.push('save');
       saved.push(structuredClone(value));
     },
-    waitForResults: async () => ({
+    waitForResults: async ({ workId: expectedWorkId }) => ({
       version: 1,
+      workId: expectedWorkId,
       items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
     }),
     removeSidecars: async () => {
@@ -399,10 +455,11 @@ test('workflow does not retry a failed timestamp transition save', async () => {
     initialOutbox: { version: 1, entries: [timestampEntry()] },
     captureNew: false,
     save: async () => { throw saveError; },
-    waitForResults: async () => {
+    waitForResults: async ({ workId: expectedWorkId }) => {
       waits += 1;
       return {
         version: 1,
+        workId: expectedWorkId,
         items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
       };
     },
