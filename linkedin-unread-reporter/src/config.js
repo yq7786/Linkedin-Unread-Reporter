@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { readPrivateFileSync } from './private-file.js';
+
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const DEFAULTS = Object.freeze({
@@ -40,14 +42,19 @@ export function parseEnvText(text) {
   return values;
 }
 
-export function readProjectEnv({ projectRoot = PROJECT_ROOT, baseEnv = process.env } = {}) {
+export function readProjectEnv({
+  projectRoot = PROJECT_ROOT,
+  baseEnv = process.env,
+  fileSystem = fs,
+} = {}) {
   const envPath = path.join(projectRoot, '.env');
   let fileValues = {};
-  try {
-    fileValues = parseEnvText(fs.readFileSync(envPath, 'utf8'));
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+  const text = readPrivateFileSync({
+    filePath: envPath,
+    fileSystem,
+    errorMessage: 'Environment file could not be read securely.',
+  });
+  if (text !== null) fileValues = parseEnvText(text);
   return { ...fileValues, ...baseEnv };
 }
 

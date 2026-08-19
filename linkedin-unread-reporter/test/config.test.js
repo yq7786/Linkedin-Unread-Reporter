@@ -1,11 +1,154 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ConfigError, loadConfig, parseEnvText, redactSecrets } from '../src/config.js';
+import {
+  ConfigError,
+  loadConfig,
+  parseEnvText,
+  readProjectEnv,
+  redactSecrets,
+} from '../src/config.js';
 
 const validPortalUrl = 'https://portal.example.test/hooks/linkedin';
 const validCallSecret = 'private-call-secret';
+
+function privateStat({ dev = 1, ino = 2, mode = 0o100600, isFile = true } = {}) {
+  return { dev, ino, mode, isFile: () => isFile };
+}
+
+test('readProjectEnv reads a private regular file through one no-follow handle', () => {
+  const calls = [];
+  const fileSystem = {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+    openSync: (...args) => { calls.push(['openSync', ...args]); return 17; },
+    fstatSync: (...args) => { calls.push(['fstatSync', ...args]); return privateStat(); },
+    readFileSync: (...args) => { calls.push(['readFileSync', ...args]); return 'PRIVATE=value\n'; },
+    lstatSync: (...args) => { calls.push(['lstatSync', ...args]); return privateStat(); },
+    closeSync: (...args) => { calls.push(['closeSync', ...args]); },
+  };
+
+  assert.deepEqual(readProjectEnv({
+    projectRoot: '/private/project',
+    baseEnv: { PUBLIC: 'base' },
+    fileSystem,
+  }), { PRIVATE: 'value', PUBLIC: 'base' });
+  assert.deepEqual(calls, [
+    ['openSync', '/private/project/.env', 0x20000],
+    ['fstatSync', 17],
+    ['readFileSync', 17, 'utf8'],
+    ['lstatSync', '/private/project/.env'],
+    ['closeSync', 17],
+  ]);
+});
+
+test('readProjectEnv preserves missing-file behavior and fails closed without O_NOFOLLOW', () => {
+  const missing = new Error('private missing path');
+  missing.code = 'ENOENT';
+  assert.deepEqual(readProjectEnv({
+    projectRoot: '/private/project',
+    baseEnv: { PUBLIC: 'base' },
+    fileSystem: {
+      constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+      openSync: () => { throw missing; },
+    },
+  }), { PUBLIC: 'base' });
+
+  assert.throws(() => readProjectEnv({
+    projectRoot: '/private/project',
+    baseEnv: {},
+    fileSystem: { constants: { O_RDONLY: 0 }, openSync: assert.fail },
+  }), (error) => error.message === 'Environment file could not be read securely.');
+});
+
+test('readProjectEnv rejects symlinks, directories, broad permissions, and replacement races safely', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'linkedin-env-hardening-'));
+  const privateContent = 'PRIVATE_ENV_CONTENT=must-not-leak';
+  const privatePath = path.join(directory, 'must-not-leak.env');
+  const envPath = path.join(directory, '.env');
+  try {
+    fs.writeFileSync(privatePath, privateContent, { mode: 0o600 });
+    fs.symlinkSync(privatePath, envPath);
+    assert.throws(
+      () => readProjectEnv({ projectRoot: directory, baseEnv: {} }),
+      (error) => error.message === 'Environment file could not be read securely.'
+        && !error.message.includes(privateContent)
+        && !error.message.includes(directory),
+    );
+    fs.unlinkSync(envPath);
+
+    fs.mkdirSync(envPath);
+    assert.throws(
+      () => readProjectEnv({ projectRoot: directory, baseEnv: {} }),
+      (error) => error.message === 'Environment file could not be read securely.',
+    );
+    fs.rmdirSync(envPath);
+
+    fs.writeFileSync(envPath, privateContent, { mode: 0o644 });
+    assert.throws(
+      () => readProjectEnv({ projectRoot: directory, baseEnv: {} }),
+      (error) => error.message === 'Environment file could not be read securely.'
+        && !error.message.includes(privateContent)
+        && !error.message.includes(directory),
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+
+  let closed = false;
+  assert.throws(() => readProjectEnv({
+    projectRoot: '/private/project',
+    baseEnv: {},
+    fileSystem: {
+      constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+      openSync: () => 17,
+      fstatSync: () => privateStat({ ino: 2 }),
+      readFileSync: () => privateContent,
+      lstatSync: () => privateStat({ ino: 3 }),
+      closeSync: () => { closed = true; },
+    },
+  }), (error) => error.message === 'Environment file could not be read securely.'
+    && !error.message.includes(privateContent)
+    && !error.message.includes('/private/project'));
+  assert.equal(closed, true);
+});
+
+test('readProjectEnv closes once and preserves a primary failure over close failure', () => {
+  const calls = [];
+  const privateContent = 'PRIVATE_ENV_CONTENT=must-not-leak';
+  assert.throws(() => readProjectEnv({
+    projectRoot: '/private/project',
+    baseEnv: {},
+    fileSystem: {
+      constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+      openSync: () => 17,
+      fstatSync: () => privateStat(),
+      readFileSync: () => { calls.push('read'); throw new Error(privateContent); },
+      lstatSync: () => { calls.push('lstat'); return privateStat(); },
+      closeSync: () => { calls.push('close'); throw new Error('private close failure'); },
+    },
+  }), (error) => error.message === 'Environment file could not be read securely.'
+    && !error.message.includes(privateContent)
+    && !error.message.includes('/private/project'));
+  assert.deepEqual(calls, ['read', 'close']);
+
+  assert.throws(() => readProjectEnv({
+    projectRoot: '/private/project',
+    baseEnv: {},
+    fileSystem: {
+      constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+      openSync: () => 17,
+      fstatSync: () => privateStat(),
+      readFileSync: () => 'PRIVATE=value\n',
+      lstatSync: () => privateStat(),
+      closeSync: () => { throw new Error('private close failure'); },
+    },
+  }), (error) => error.message === 'Environment file could not be read securely.'
+    && !error.message.includes('private close failure')
+    && !error.message.includes('/private/project'));
+});
 
 test('loadConfig applies safe defaults relative to the project root', () => {
   const config = loadConfig({

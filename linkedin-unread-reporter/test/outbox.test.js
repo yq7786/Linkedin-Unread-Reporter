@@ -72,6 +72,23 @@ const ready = {
   sentAtAccuracy: 'estimated',
 };
 
+function privateStat({ dev = 1, ino = 2, mode = 0o100600, isFile = true } = {}) {
+  return { dev, ino, mode, isFile: () => isFile };
+}
+
+function readablePrivateFileSystem(text, { openedStat, pathStat, calls = [] } = {}) {
+  const handle = {
+    stat: async () => { calls.push(['handle.stat']); return openedStat ?? privateStat(); },
+    readFile: async (...args) => { calls.push(['handle.readFile', ...args]); return text; },
+    close: async () => { calls.push(['handle.close']); },
+  };
+  return {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+    open: async (...args) => { calls.push(['open', ...args]); return handle; },
+    lstat: async (...args) => { calls.push(['lstat', ...args]); return pathStat ?? privateStat(); },
+  };
+}
+
 test('createEmptyOutbox returns a fresh versioned outbox', () => {
   const first = createEmptyOutbox();
   const second = createEmptyOutbox();
@@ -117,11 +134,26 @@ test('loadOutbox rejects stored non-canonical conversation URLs without exposing
   const privateUrl = 'https://evil.example/private-thread';
   await assert.rejects(loadOutbox({
     outboxPath: '/private/outbox.json',
-    fileSystem: { readFile: async () => JSON.stringify({
+    fileSystem: readablePrivateFileSystem(JSON.stringify({
       version: 1,
       entries: [{ ...ready, conversationUrl: privateUrl }],
-    }) },
+    })),
   }), (error) => /invalid/i.test(error.message) && !error.message.includes(privateUrl));
+});
+
+test('loadOutbox reads private state through one no-follow FileHandle', async () => {
+  const calls = [];
+  const value = { version: 1, entries: [ready] };
+  const fileSystem = readablePrivateFileSystem(JSON.stringify(value), { calls });
+
+  assert.deepEqual(await loadOutbox({ outboxPath: '/private/outbox.json', fileSystem }), value);
+  assert.deepEqual(calls, [
+    ['open', '/private/outbox.json', 0x20000],
+    ['handle.stat'],
+    ['handle.readFile', 'utf8'],
+    ['lstat', '/private/outbox.json'],
+    ['handle.close'],
+  ]);
 });
 
 test('loadOutbox returns an empty outbox only when the file does not exist', async () => {
@@ -135,16 +167,103 @@ test('loadOutbox returns an empty outbox only when the file does not exist', asy
     denied.code = 'EACCES';
     await assert.rejects(loadOutbox({
       outboxPath: '/private/outbox.json',
-      fileSystem: { readFile: async () => { throw denied; } },
-    }), denied);
+      fileSystem: {
+        constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+        open: async () => { throw denied; },
+      },
+    }), (error) => error.message === 'Private state could not be read securely.'
+      && !error.message.includes('private path denied')
+      && !error.message.includes('/private/outbox.json'));
   });
+});
+
+test('loadOutbox fails closed without O_NOFOLLOW support', async () => {
+  await assert.rejects(loadOutbox({
+    outboxPath: '/private/outbox.json',
+    fileSystem: { constants: { O_RDONLY: 0 }, open: async () => assert.fail() },
+  }), (error) => error.message === 'Private state could not be read securely.');
+});
+
+test('loadOutbox rejects symlinks, directories, broad permissions, and replacement races safely', async () => {
+  await withTempDirectory(async (directory) => {
+    const privateContent = 'PRIVATE_OUTBOX_CONTENT=must-not-leak';
+    const targetPath = path.join(directory, 'must-not-leak.json');
+    const outboxPath = path.join(directory, 'outbox.json');
+    await fs.writeFile(targetPath, privateContent, { mode: 0o600 });
+    await fs.symlink(targetPath, outboxPath);
+    await assert.rejects(loadOutbox({ outboxPath }), (error) => (
+      error.message === 'Private state could not be read securely.'
+      && !error.message.includes(privateContent)
+      && !error.message.includes(directory)
+    ));
+    await fs.unlink(outboxPath);
+
+    await fs.mkdir(outboxPath);
+    await assert.rejects(loadOutbox({ outboxPath }), (error) => (
+      error.message === 'Private state could not be read securely.'
+    ));
+    await fs.rmdir(outboxPath);
+
+    await fs.writeFile(outboxPath, privateContent, { mode: 0o644 });
+    await assert.rejects(loadOutbox({ outboxPath }), (error) => (
+      error.message === 'Private state could not be read securely.'
+      && !error.message.includes(privateContent)
+      && !error.message.includes(directory)
+    ));
+  });
+
+  const privateContent = 'PRIVATE_OUTBOX_CONTENT=must-not-leak';
+  await assert.rejects(loadOutbox({
+    outboxPath: '/private/outbox.json',
+    fileSystem: readablePrivateFileSystem(privateContent, {
+      openedStat: privateStat({ ino: 2 }),
+      pathStat: privateStat({ ino: 3 }),
+    }),
+  }), (error) => error.message === 'Private state could not be read securely.'
+    && !error.message.includes(privateContent)
+    && !error.message.includes('/private/outbox.json'));
+});
+
+test('loadOutbox closes once and preserves a primary failure over close failure', async () => {
+  const calls = [];
+  const privateContent = 'PRIVATE_OUTBOX_CONTENT=must-not-leak';
+  await assert.rejects(loadOutbox({
+    outboxPath: '/private/outbox.json',
+    fileSystem: {
+      constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+      open: async () => ({
+        stat: async () => privateStat(),
+        readFile: async () => { calls.push('read'); throw new Error(privateContent); },
+        close: async () => { calls.push('close'); throw new Error('private close failure'); },
+      }),
+      lstat: async () => { calls.push('lstat'); return privateStat(); },
+    },
+  }), (error) => error.message === 'Private state could not be read securely.'
+    && !error.message.includes(privateContent)
+    && !error.message.includes('/private/outbox.json'));
+  assert.deepEqual(calls, ['read', 'close']);
+
+  await assert.rejects(loadOutbox({
+    outboxPath: '/private/outbox.json',
+    fileSystem: {
+      constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+      open: async () => ({
+        stat: async () => privateStat(),
+        readFile: async () => JSON.stringify({ version: 1, entries: [] }),
+        close: async () => { throw new Error('private close failure'); },
+      }),
+      lstat: async () => privateStat(),
+    },
+  }), (error) => error.message === 'Private state could not be read securely.'
+    && !error.message.includes('private close failure')
+    && !error.message.includes('/private/outbox.json'));
 });
 
 test('loadOutbox rejects corrupt JSON without exposing file contents', async () => {
   const privateFragment = 'private-corrupt-fragment';
   await assert.rejects(loadOutbox({
     outboxPath: '/private/outbox.json',
-    fileSystem: { readFile: async () => `{${privateFragment}` },
+    fileSystem: readablePrivateFileSystem(`{${privateFragment}`),
   }), (error) => /corrupt/i.test(error.message) && !error.message.includes(privateFragment));
 });
 
@@ -159,10 +278,27 @@ test('saveOutbox writes versioned private JSON atomically', async () => {
   });
 });
 
+test('saveOutbox creates exact mode-0600 state under a restrictive umask', async () => {
+  await withTempDirectory(async (directory) => {
+    const outboxPath = path.join(directory, 'outbox.json');
+    const value = { version: 1, entries: [ready] };
+    const previousUmask = process.umask(0o777);
+    try {
+      await saveOutbox({ outboxPath, value });
+    } finally {
+      process.umask(previousUmask);
+    }
+
+    assert.equal((await fs.stat(outboxPath)).mode & 0o7777, 0o600);
+    assert.deepEqual(await loadOutbox({ outboxPath }), value);
+  });
+});
+
 test('saveOutbox fsyncs the private temporary file before rename and then fsyncs its parent', async () => {
   const calls = [];
   const text = `${JSON.stringify({ version: 1, entries: [ready] }, null, 2)}\n`;
   const temporaryHandle = {
+    chmod: async (...args) => { calls.push(['temp.chmod', ...args]); },
     writeFile: async (...args) => { calls.push(['temp.writeFile', ...args]); },
     sync: async () => { calls.push(['temp.sync']); },
     close: async () => { calls.push(['temp.close']); },
@@ -188,6 +324,7 @@ test('saveOutbox fsyncs the private temporary file before rename and then fsyncs
   });
   assert.deepEqual(calls, [
     ['open', '/private/outbox.json.tmp-42', 'wx', 0o600],
+    ['temp.chmod', 0o600],
     ['temp.writeFile', text, { encoding: 'utf8' }],
     ['temp.sync'],
     ['temp.close'],
@@ -206,6 +343,7 @@ test('saveOutbox validates before opening a file and preserves write errors over
     open: async (...args) => {
       calls.push(['open', ...args]);
       return {
+        chmod: async () => { calls.push(['chmod']); },
         writeFile: async () => { throw primaryError; },
         sync: async () => {},
         close: async () => { calls.push(['close']); throw new Error('cleanup-close-failed'); },
@@ -222,6 +360,7 @@ test('saveOutbox validates before opening a file and preserves write errors over
   }), (error) => error === primaryError);
   assert.deepEqual(calls, [
     ['open', '/private/outbox.json.tmp-42', 'wx', 0o600],
+    ['chmod'],
     ['close'],
     ['rm', '/private/outbox.json.tmp-42', { force: true }],
   ]);

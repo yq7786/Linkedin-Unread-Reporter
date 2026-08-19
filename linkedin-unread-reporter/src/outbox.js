@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import properLockfile from 'proper-lockfile';
 
+import { readPrivateFile } from './private-file.js';
+
 const COMMON_FIELDS = ['entryId', 'state', 'leadName', 'conversationUrl'];
 const ENTRY_FIELDS = {
   capture_pending: new Set([...COMMON_FIELDS, 'expectedUnreadCount', 'firstFailureAt', 'attemptCount']),
@@ -181,13 +183,12 @@ export function validateOutbox(value) {
 }
 
 export async function loadOutbox({ outboxPath, fileSystem = fs }) {
-  let text;
-  try {
-    text = await fileSystem.readFile(outboxPath, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') return createEmptyOutbox();
-    throw error;
-  }
+  const text = await readPrivateFile({
+    filePath: outboxPath,
+    fileSystem,
+    errorMessage: 'Private state could not be read securely.',
+  });
+  if (text === null) return createEmptyOutbox();
   let value;
   try {
     value = JSON.parse(text);
@@ -204,6 +205,7 @@ export async function saveOutbox({ outboxPath, value, fileSystem = fs, processId
   let primaryError;
   try {
     temporaryHandle = await fileSystem.open(temporaryPath, 'wx', 0o600);
+    await temporaryHandle.chmod(0o600);
     await temporaryHandle.writeFile(`${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8' });
     await temporaryHandle.sync();
     try {

@@ -96,9 +96,11 @@ const CONFIG_ERROR_MESSAGES = new Set([
 ]);
 const STATIC_INTERNAL_MESSAGES = new Set([
   'Configuration requires an interactive terminal. Run `npm run configure` manually.',
+  'Environment file could not be read securely.',
   'LinkedIn unread reporter is already running.',
   'Outbox lock failed.',
   'Outbox JSON is corrupt.',
+  'Private state could not be read securely.',
   'Timestamp result close failed.',
   'Timestamp result read failed.',
   'Timestamp result permissions are invalid.',

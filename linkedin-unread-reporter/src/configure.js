@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { loadConfig, PROJECT_ROOT } from './config.js';
+import { readPrivateFile } from './private-file.js';
 
 export function updateEnvText(existingText, values) {
   const pending = new Map(Object.entries(values));
@@ -72,12 +73,11 @@ export async function readHiddenSecret({
 }
 
 async function writePrivateEnv({ envPath, values, fileSystem, processId }) {
-  let existingText = '';
-  try {
-    existingText = await fileSystem.readFile(envPath, 'utf8');
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
+  const existingText = await readPrivateFile({
+    filePath: envPath,
+    fileSystem,
+    errorMessage: 'Environment file could not be read securely.',
+  }) ?? '';
 
   const updatedText = updateEnvText(existingText, values);
   const temporaryPath = `${envPath}.tmp-${processId}`;
@@ -87,8 +87,8 @@ async function writePrivateEnv({ envPath, values, fileSystem, processId }) {
       mode: 0o600,
       flag: 'wx',
     });
+    await fileSystem.chmod(temporaryPath, 0o600);
     await fileSystem.rename(temporaryPath, envPath);
-    await fileSystem.chmod(envPath, 0o600);
   } finally {
     await fileSystem.rm(temporaryPath, { force: true });
   }

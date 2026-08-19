@@ -178,6 +178,8 @@ test('known sanitized internal errors remain actionable', async () => {
     new MessageDataError('message-id-invalid'),
     new OutboxValidationError(),
     new PortalDeliveryError('Portal delivery failed (network).'),
+    new Error('Environment file could not be read securely.'),
+    new Error('Private state could not be read securely.'),
     new Error('Timestamp result polling timed out.'),
     new Error('Workflow dependency output is invalid.'),
   ];
