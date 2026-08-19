@@ -1,11 +1,11 @@
 ---
 name: linkedin-unread-reporter
-description: Set up, verify, run, troubleshoot, or locally schedule the self-contained LinkedIn Unread Reporter skill. Use when a user wants LinkedIn unread conversation names and counts sent to Slack without the LinkedIn API, wants to configure the persistent browser login or Slack webhook, or wants the fixed recurring Adelaide reports.
+description: Set up, verify, run, troubleshoot, or locally schedule the self-contained LinkedIn Unread Reporter skill. Use when a user wants unread one-to-one LinkedIn messages ingested into a private portal without the LinkedIn API, needs the persistent browser login or private Portal credentials configured, or wants the fixed recurring Adelaide reports.
 ---
 
 # LinkedIn Unread Reporter
 
-Operate the read-only Playwright reporter installed beside this `SKILL.md`. Never ask for or store LinkedIn credentials, never repeat a supplied Slack webhook or put it in an automation prompt, and never open a conversation row during scanning.
+Operate the Playwright reporter installed beside this `SKILL.md`. It uses a strict read-on-open boundary: it may open only an explicitly eligible unread one-to-one thread, captures only incoming messages inside that thread's unread boundary, and checkpoints immediately after extraction. Never ask for or store LinkedIn credentials. Never send or edit a LinkedIn message, follow a link, or follow or download an attachment. Keep every terminal and Codex task response count-only.
 
 ## Verify the installation
 
@@ -22,30 +22,33 @@ If any marker is missing, stop immediately before installing dependencies or tak
 ## Setup workflow
 
 1. Verify Node.js 18 or newer, run `npm install`, and run `npx playwright install chromium` if the browser runtime is absent.
-2. If `.env` lacks `SLACK_WEBHOOK_URL`, tell the user once that the supplied value will remain in chat history, then ask exactly: **Please provide `SLACK_WEBHOOK_URL`.** After the response, do not quote, summarize, validate visibly, or repeat it. Start `npm run configure` in an interactive PTY and submit the supplied value through its hidden input. Never place the value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output. Do not read `.env` back; verify only the configurator's success message and that `.env` has mode `0600`.
-3. Run `npm run login` to prepare the persistent LinkedIn session without scanning conversation rows or contacting Slack. A visible browser opens. If LinkedIn shows login, CAPTCHA, checkpoint, or identity verification, tell the user exactly which manual action to complete there and wait up to 15 minutes. Never automate or bypass the challenge. After the unread inbox is detected as ready twice, the command saves the browser profile and closes Chromium automatically.
-4. Run `npm run scan` for a supervised dry scan. Explain that it reopens Chromium with the session saved by the login command, reads only unread conversation-list rows, and closes again when finished.
-5. Confirm the scan completes without names in terminal logs. Obtain confirmation before `npm run slack-test`, because it sends one external Slack message.
-6. After the scan and Slack delivery verification succeed, read [references/automation-setup.md](references/automation-setup.md) completely and create or update the three fixed local schedules automatically.
-7. Run `npm run report` only when the user asks for or approves a real report.
+2. If Portal delivery is not configured, tell the user once that both supplied values will remain in chat history. Start `npm run configure` in an interactive PTY. When its first hidden prompt appears, ask exactly: **Please provide the Portal Webhook URL.** Transfer the response only through the PTY's hidden input. When its second hidden prompt appears, ask exactly: **Please provide `PORTAL_CALL_SECRET`.** Transfer that response the same way. Never quote, summarize, visibly validate, or repeat either value. Never put either value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output. The configurator requires an HTTPS `PORTAL_WEBHOOK_URL`. Do not read `.env` back; verify only the success message and that `.env` has mode `0600`.
+3. Run `npm run login` to prepare the persistent LinkedIn session without opening conversation rows or contacting the Portal. A visible browser opens. If LinkedIn shows login, CAPTCHA, checkpoint, or identity verification, tell the user exactly which manual action to complete there and wait up to 15 minutes. Never automate or bypass the challenge. After the unread inbox is detected as ready twice, the command saves the browser profile and closes Chromium automatically.
+4. Run `npm run scan` for a supervised dry scan. Explain before running it that opening an eligible unread thread may change LinkedIn's read state. For a direct-URL candidate, the reporter saves a recovery marker before opening the URL. For an anchorless candidate, it opens the exact row, then `onOpened` validates the resulting thread URL and immediately persists the recovery marker before extraction. This anchorless path has a narrow unavoidable crash window between the row opening and marker persistence. The scan writes captured private data to the mode-`0600` `.linkedin-unread-outbox.json`, never calls the Portal, and prints counts only.
+5. Confirm the dry scan completed without names, message content, or LinkedIn URLs in terminal output. Obtain the user's explicit approval before running `npm run deliver` for the first real Portal batch. Run it in a persistent PTY and report only its final counts or sanitized error. If it requests timestamp normalization, follow the timestamp-only subagent protocol in [references/automation-setup.md](references/automation-setup.md).
+6. Activate schedules only after count-only evidence proves both that the dry scan captured at least one message and that `npm run deliver` acknowledged a nonempty batch: `Created + Duplicates + Assumed duplicates > 0`. If the dry scan captured zero messages, or delivery made no HTTP request or produced no HTTP acknowledgement, defer all schedules and tell the user to rerun setup after unread messages exist. After the gate passes, read [references/automation-setup.md](references/automation-setup.md) completely and create or update the three fixed local schedules automatically.
+7. Run `npm run report` outside a schedule only when the user asks for or approves a real capture-and-deliver report. Monitor it in the same persistent-PTY manner defined by the automation reference.
 
 ## Safety invariants
 
 - Navigate directly to `https://www.linkedin.com/messaging/?filter=unread`.
-- Inspect conversation-list rows only. Never click or open a conversation, send a message, or inspect a message detail pane.
-- Require LinkedIn's explicit unread state. Exclude only explicit Sponsored or automated-conversation labels; do not infer automation from preview text.
+- Before opening any candidate, require LinkedIn's explicit unread state, one-to-one eligibility, an unambiguous unread count, and all unread-list invariants. Exclude group, Sponsored, and explicitly automated conversations. Require and validate a stable conversation URL before opening only when the candidate supplies a direct URL; use the separately checkpointed anchorless path below when it does not.
+- Use the read-on-open boundary: open only an explicitly eligible unread one-to-one thread and capture only incoming messages within its pre-open unread boundary. Save a direct-URL candidate marker before opening. For an anchorless row, open the exact row, then `onOpened` validates its thread URL and immediately persists the marker before extraction; acknowledge the narrow unavoidable crash window before that callback persists. Checkpoint immediately after extraction by replacing the marker with extracted entries. Never open an ineligible row or use preview text as message content.
+- Never send or edit a LinkedIn message. Never click a link, react, or follow a profile. Never follow or download an attachment.
 - Stop when the list is stable with no Load more control, or after 50 eligible rows. Do not replace this with a read-message streak rule.
-- Fail closed if the Unread button is not pressed, a row is active, or a detail pane is visible.
-- Keep `.env` and `.linkedin-browser-profile/` local and gitignored. Store no contact queue, names, previews, credentials, cookies, or thread identifiers in logs.
-- Never reuse a revoked or previously disclosed webhook. Each user supplies their own current webhook once; after collection, keep it only in the local `.env` and the already accepted chat history.
+- Fail closed if the Unread filter is not active, row identity or unread state is ambiguous, the wrong thread opens, or message content, direction, boundary, or timestamp cannot be determined safely.
+- Treat `.linkedin-unread-outbox.json` as a private durable outbox. It contains names, message content, thread URLs, and delivery state, must remain mode `0600`, and must never be read or summarized by Codex or a timestamp subagent. Direct-URL recovery is durable before opening; anchorless recovery becomes durable in `onOpened` immediately after URL validation and before extraction; completed extraction is then checkpointed immediately.
+- Keep `.env`, `.linkedin-browser-profile/`, `.linkedin-unread-outbox.json`, `.linkedin-timestamp-work.json`, `.linkedin-timestamp-results.json`, and their temporary/lock files local and gitignored. Never expose their sensitive fields in logs, prompts, or task output.
+- Keep output count-only: processed conversations, captured messages, Portal result counts, pending recovery, and pending timestamp counts are allowed. Names, message content, thread URLs, timestamps, credentials, cookies, and sidecar contents are not.
 
 ## Scheduling
 
-Use Codex's automation capability to create or update local schedules against the current local project. Do not emit raw automation directives or embed credentials. Always use the three fixed weekday times and `Australia/Adelaide` timezone defined in [references/automation-setup.md](references/automation-setup.md); do not ask for alternatives.
+Use Codex's automation capability to create or update local schedules against the current local project. Do not emit raw automation directives or embed credentials or absolute paths. Always use the three fixed weekday times, model, reasoning effort, timestamp-only subagent protocol, and `Australia/Adelaide` timezone defined in [references/automation-setup.md](references/automation-setup.md); do not ask for alternatives.
 
 ## Troubleshooting
 
-- For login/CAPTCHA/checkpoint failures, use `npm run login` and keep its visible browser open for manual recovery. If unresolved after 15 minutes, report failure and do not send Slack. Ordinary LinkedIn navigation during recovery is retried within that same deadline; browser-closed and unexpected errors still fail immediately.
+- For login/CAPTCHA/checkpoint failures, use `npm run login` and keep its visible browser open for manual recovery. If unresolved after 15 minutes, report failure and do not deliver to the Portal. Ordinary LinkedIn navigation during recovery is retried within that same deadline; browser-closed and unexpected errors still fail immediately.
 - For selector or invariant failures, do not weaken the safety checks. Reproduce with a sanitized fixture and update tests before code.
-- For Slack failures, report only the status category or sanitized network error. Never print the webhook or Slack response body.
+- For Portal failures, report only the status category or sanitized network error. Never print the response body, Portal URL, call secret, outbox, or message payload.
+- If timestamp normalization reaches attempt three without a valid result, let the reporter apply its local fallback. Do not inspect private files or add further attempts.
 - Scheduled runs are local: the computer must be awake, signed in, and able to display the headed browser. Missed runs are not backfilled.

@@ -1,4 +1,4 @@
 interface:
   display_name: "LinkedIn Unread Reporter"
-  short_description: "Configure local LinkedIn unread Slack reports"
-  default_prompt: "Use $linkedin-unread-reporter to set up this installed reporter and create its schedules."
+  short_description: "Ingest LinkedIn unread messages privately"
+  default_prompt: "Use $linkedin-unread-reporter to set up private Portal ingestion and create its fixed Adelaide schedules."
