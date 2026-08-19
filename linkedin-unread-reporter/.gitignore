@@ -2,6 +2,13 @@ node_modules/
 .env
 .env.tmp-*
 .linkedin-browser-profile/
+.linkedin-unread-outbox.json
+.linkedin-unread-outbox.json.tmp-*
+.linkedin-unread-outbox.lock
+.linkedin-timestamp-work.json
+.linkedin-timestamp-work.json.tmp-*
+.linkedin-timestamp-results.json
+.linkedin-timestamp-results.json.tmp-*
 playwright-report/
 test-results/
 coverage/

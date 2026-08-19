@@ -46,6 +46,21 @@ test('repository exposes a complete named skill path', async () => {
   assert.doesNotMatch(readme, /--path \.([\s`]|$)/);
 });
 
+test('packaging ignores all private portal ingestion state files', async () => {
+  const gitignore = await fs.readFile(path.join(skillRoot, '.gitignore'), 'utf8');
+  for (const pattern of [
+    '.linkedin-unread-outbox.json',
+    '.linkedin-unread-outbox.json.tmp-*',
+    '.linkedin-unread-outbox.lock',
+    '.linkedin-timestamp-work.json',
+    '.linkedin-timestamp-work.json.tmp-*',
+    '.linkedin-timestamp-results.json',
+    '.linkedin-timestamp-results.json.tmp-*',
+  ]) {
+    assert.equal(gitignore.split(/\r?\n/).includes(pattern), true, pattern);
+  }
+});
+
 test('Git sparse checkout of the named path contains the complete skill', async () => {
   const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-sparse-layout-'));
   try {

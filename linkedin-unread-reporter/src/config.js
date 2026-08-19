@@ -6,6 +6,10 @@ export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.
 
 const DEFAULTS = Object.freeze({
   browserProfilePath: '.linkedin-browser-profile',
+  outboxPath: '.linkedin-unread-outbox.json',
+  outboxLockPath: '.linkedin-unread-outbox.lock',
+  timestampWorkPath: '.linkedin-timestamp-work.json',
+  timestampResultPath: '.linkedin-timestamp-results.json',
   unreadUrl: 'https://www.linkedin.com/messaging/?filter=unread',
   maxUnreadConversations: 50,
   authTimeoutMs: 900_000,
@@ -59,7 +63,27 @@ function parseBoundedInteger(value, fallback, name, { min, max }) {
   return parsed;
 }
 
-function validateWebhook(value) {
+function validatePortalUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'https:'
+      || url.username
+      || url.password) {
+      throw new Error('invalid');
+    }
+    return url.toString();
+  } catch {
+    throw new ConfigError('PORTAL_WEBHOOK_URL must be a valid HTTPS URL without embedded credentials. Run `npm run configure`.');
+  }
+}
+
+function validatePortalCallSecret(value) {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  return value;
+}
+
+function validateSlackWebhook(value) {
   if (!value) return null;
   try {
     const url = new URL(value);
@@ -103,9 +127,18 @@ function validateTimezone(value) {
 export function loadConfig({
   env = readProjectEnv(),
   projectRoot = PROJECT_ROOT,
-  requireWebhook = true,
+  requirePortal,
+  requireWebhook,
 } = {}) {
-  const slackWebhookUrl = validateWebhook(env.SLACK_WEBHOOK_URL);
+  const portalWebhookUrl = validatePortalUrl(env.PORTAL_WEBHOOK_URL);
+  const portalCallSecret = validatePortalCallSecret(env.PORTAL_CALL_SECRET);
+  const slackWebhookUrl = requireWebhook === undefined
+    ? null
+    : validateSlackWebhook(env.SLACK_WEBHOOK_URL);
+  const portalRequired = requirePortal ?? (requireWebhook === undefined);
+  if (portalRequired && (!portalWebhookUrl || !portalCallSecret)) {
+    throw new ConfigError('Portal delivery is not configured. Run `npm run configure` in an interactive terminal.');
+  }
   if (requireWebhook && !slackWebhookUrl) {
     throw new ConfigError('SLACK_WEBHOOK_URL is not configured. Run `npm run configure` in an interactive terminal.');
   }
@@ -117,8 +150,14 @@ export function loadConfig({
 
   return Object.freeze({
     projectRoot,
+    portalWebhookUrl,
+    portalCallSecret,
     slackWebhookUrl,
     browserProfilePath,
+    outboxPath: path.resolve(projectRoot, DEFAULTS.outboxPath),
+    outboxLockPath: path.resolve(projectRoot, DEFAULTS.outboxLockPath),
+    timestampWorkPath: path.resolve(projectRoot, DEFAULTS.timestampWorkPath),
+    timestampResultPath: path.resolve(projectRoot, DEFAULTS.timestampResultPath),
     unreadUrl: validateUnreadUrl(env.LINKEDIN_UNREAD_URL || DEFAULTS.unreadUrl),
     maxUnreadConversations: parseBoundedInteger(
       env.MAX_UNREAD_CONVERSATIONS,
@@ -136,9 +175,16 @@ export function loadConfig({
   });
 }
 
-export function redactSecrets(value) {
-  return String(value).replace(
+export function redactSecrets(value, { secrets = [] } = {}) {
+  let redacted = String(value).replace(
     /https:\/\/hooks\.slack\.com\/services\/[^\s'"<>]+/gi,
     '[REDACTED_SLACK_WEBHOOK]',
   );
+  const explicitSecrets = [...new Set(
+    secrets.filter((secret) => typeof secret === 'string' && secret),
+  )].sort((left, right) => right.length - left.length);
+  for (const secret of explicitSecrets) {
+    redacted = redacted.split(secret).join('[REDACTED_PORTAL_SECRET]');
+  }
+  return redacted;
 }

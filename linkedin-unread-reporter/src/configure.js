@@ -81,6 +81,7 @@ export async function configureSlack({
   loadConfig({
     env: { SLACK_WEBHOOK_URL: webhook },
     projectRoot: path.dirname(envPath),
+    requireWebhook: true,
   });
 
   let existingText = '';
