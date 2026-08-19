@@ -220,6 +220,27 @@ test('known error classes reconstruct messages without trusting mutable message 
   }
 });
 
+test('new scan safety codes reconstruct static messages and ignore mutated message text', async () => {
+  for (const code of [
+    'conversation-row-no-longer-eligible',
+    'conversation-row-url-changed',
+    'candidate-revalidation-failed',
+    'conversation-list-progress-invalid',
+  ]) {
+    const error = new ScanInvariantError(code);
+    error.message = 'Private Person {"content":"private thread"}';
+    const { dependencies, stderr } = harness({
+      captureDryRunImpl: async () => { throw error; },
+    });
+
+    assert.equal(await runCli(['scan'], dependencies), 1);
+    assert.equal(
+      stderr.join('\n'),
+      `LinkedIn unread-list safety invariant failed: ${code}. No report was sent.`,
+    );
+  }
+});
+
 test('subclassed known errors are not trusted even with allowlisted metadata', async () => {
   class AdversarialConfigError extends ConfigError {}
   class AdversarialScanError extends ScanInvariantError {}

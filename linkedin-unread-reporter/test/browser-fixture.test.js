@@ -8,6 +8,8 @@ import { chromium } from 'playwright';
 
 import { LinkedInBlockerError, PlaywrightLinkedInAdapter } from '../src/browser.js';
 import { normalizeConversationRow, ScanInvariantError } from '../src/linkedin-state.js';
+import { createEmptyOutbox, validateOutbox } from '../src/outbox.js';
+import { captureUnreadMessages } from '../src/scanner.js';
 
 const fixtures = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures');
 
@@ -75,6 +77,175 @@ browserTest('readUnreadCandidates returns eligible humans with URL and count met
   assert.doesNotMatch(JSON.stringify(candidates), /preview|content|Private|group|Sponsored|Automated/i);
 });
 
+browserTest('capture safely loads a virtualized second candidate without clicking a conversation', async (page) => {
+  const unreadUrl = 'https://www.linkedin.com/messaging/?filter=unread';
+  const firstUrl = 'https://www.linkedin.com/messaging/thread/virtual-1/';
+  const secondUrl = 'https://www.linkedin.com/messaging/thread/virtual-2/';
+  const unreadFixture = `<!doctype html><html><body>
+    <button aria-pressed="true">Unread</button>
+    <ul data-reporter-conversation-list style="width:320px;height:120px;overflow:auto">
+      <li data-reporter-row-id="virtual-row-1" class="msg-conversation-listitem--unread"
+          onclick="fixtureRowClicked()">
+        <h3 data-reporter-name>Person One</h3>
+        <a href="/messaging/thread/virtual-1/">Open</a>
+        <span aria-label="1 unread message"></span>
+      </li>
+    </ul>
+    <button onclick="this.previousElementSibling.insertAdjacentHTML('beforeend',
+      '&lt;li data-reporter-row-id=&quot;virtual-row-2&quot; class=&quot;msg-conversation-listitem--unread&quot; onclick=&quot;fixtureRowClicked()&quot;&gt;&lt;h3 data-reporter-name&gt;Person Two&lt;/h3&gt;&lt;a href=&quot;/messaging/thread/virtual-2/&quot;&gt;Open&lt;/a&gt;&lt;span aria-label=&quot;1 unread message&quot;&gt;&lt;/span&gt;&lt;/li&gt;'); this.remove()">
+      Load more conversations
+    </button>
+  </body></html>`;
+  const threadFixture = (id) => `<!doctype html><html><body>
+    <section class="msg-thread">
+      <div data-reporter-unread-divider>Unread</div>
+      <div data-reporter-message data-reporter-direction="inbound" data-reporter-message-id="message-${id}">
+        <p data-reporter-content>Sanitized ${id}</p>
+        <time datetime="2026-08-19T02:00:00.000Z">11:30am</time>
+      </div>
+    </section>
+  </body></html>`;
+  let rowClicks = 0;
+  await page.exposeFunction('fixtureRowClicked', () => { rowClicks += 1; });
+  await page.route('https://www.linkedin.com/messaging/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const id = pathname === '/messaging/thread/virtual-1/'
+      ? 'virtual-1'
+      : pathname === '/messaging/thread/virtual-2/' ? 'virtual-2' : null;
+    await route.fulfill({
+      contentType: 'text/html',
+      body: id ? threadFixture(id) : unreadFixture,
+    });
+  });
+  const realAdapter = new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 5_000,
+    recoveryOptions: { pollIntervalMs: 10 },
+  });
+  const events = [];
+  const adapter = {
+    gotoUnread: (...args) => realAdapter.gotoUnread(...args),
+    waitForUnblocked: (...args) => realAdapter.waitForUnblocked(...args),
+    inspectState: (...args) => realAdapter.inspectState(...args),
+    readUnreadCandidates: (...args) => realAdapter.readUnreadCandidates(...args),
+    revalidateUnreadCandidate: (...args) => realAdapter.revalidateUnreadCandidate(...args),
+    hasLoadMore: (...args) => realAdapter.hasLoadMore(...args),
+    loadMore: async (...args) => {
+      events.push(['loadMore']);
+      return realAdapter.loadMore(...args);
+    },
+    scrollList: (...args) => realAdapter.scrollList(...args),
+    waitForStability: (...args) => realAdapter.waitForStability(...args),
+    openConversation: async (value, options) => {
+      events.push(['open', value.conversationUrl]);
+      return realAdapter.openConversation(value, options);
+    },
+    readThreadMessages: (...args) => realAdapter.readThreadMessages(...args),
+  };
+
+  const result = await captureUnreadMessages({
+    adapter,
+    outbox: createEmptyOutbox(),
+    saveOutbox: async (value) => {
+      validateOutbox(value);
+      const pending = value.entries.find(({ state }) => state === 'capture_pending');
+      if (pending) events.push(['checkpoint', pending.conversationUrl]);
+    },
+    unreadUrl,
+    scanStartedAt: new Date('2026-08-19T03:00:00.000Z'),
+    authTimeoutMs: 5_000,
+  });
+
+  assert.deepEqual(result.outbox.entries.map(({ conversationUrl }) => conversationUrl), [
+    firstUrl,
+    secondUrl,
+  ]);
+  assert.equal(result.processedConversations, 2);
+  assert.equal(result.truncated, false);
+  assert.ok(events.some(([type]) => type === 'loadMore'));
+  for (const url of [firstUrl, secondUrl]) {
+    const checkpointIndex = events.findIndex(([type, value]) => type === 'checkpoint' && value === url);
+    const openIndex = events.findIndex(([type, value]) => type === 'open' && value === url);
+    assert.ok(checkpointIndex >= 0 && checkpointIndex < openIndex);
+    assert.equal(events.filter(([type, value]) => type === 'open' && value === url).length, 1);
+  }
+  assert.equal(rowClicks, 0);
+});
+
+browserTest('capture discovers an intermediate recycled row in each stepwise scroll window', async (page) => {
+  const unreadUrl = 'https://www.linkedin.com/messaging/?filter=unread';
+  const urls = ['window-one', 'window-middle', 'window-last']
+    .map((id) => `https://www.linkedin.com/messaging/thread/${id}/`);
+  const unreadFixture = `<!doctype html><html><body>
+    <button aria-pressed="true">Unread</button>
+    <ul data-reporter-conversation-list
+        style="position:relative;width:320px;height:100px;overflow:auto;padding:0;margin:0">
+      <div style="height:300px;width:1px"></div>
+    </ul>
+    <script>
+      const windows = [
+        ['window-one', 'Person One'],
+        ['window-middle', 'Person Middle'],
+        ['window-last', 'Person Last'],
+      ];
+      const list = document.querySelector('ul');
+      function renderWindow() {
+        const index = Math.min(2, Math.floor((list.scrollTop + 20) / 80));
+        list.querySelector('li')?.remove();
+        const [id, name] = windows[index];
+        const row = document.createElement('li');
+        row.setAttribute('data-reporter-row-id', 'recycled-window-row');
+        row.className = 'msg-conversation-listitem--unread';
+        row.style.cssText = 'position:absolute;left:0;top:' + list.scrollTop + 'px;height:80px;width:280px';
+        row.onclick = () => fixtureWindowRowClicked();
+        row.innerHTML = '<h3 data-reporter-name>' + name + '</h3>'
+          + '<a href="/messaging/thread/' + id + '/">Open</a>'
+          + '<span aria-label="1 unread message"></span>';
+        list.append(row);
+      }
+      list.addEventListener('scroll', renderWindow);
+      renderWindow();
+    </script>
+  </body></html>`;
+  const threadFixture = (id) => `<!doctype html><html><body>
+    <section class="msg-thread">
+      <div data-reporter-unread-divider>Unread</div>
+      <div data-reporter-message data-reporter-direction="inbound" data-reporter-message-id="message-${id}">
+        <p data-reporter-content>Sanitized ${id}</p>
+        <time datetime="2026-08-19T02:00:00.000Z">11:30am</time>
+      </div>
+    </section>
+  </body></html>`;
+  let rowClicks = 0;
+  await page.exposeFunction('fixtureWindowRowClicked', () => { rowClicks += 1; });
+  await page.route('https://www.linkedin.com/messaging/**', async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const id = /^\/messaging\/thread\/(window-(?:one|middle|last))\/$/.exec(pathname)?.[1];
+    await route.fulfill({ contentType: 'text/html', body: id ? threadFixture(id) : unreadFixture });
+  });
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 5_000,
+    recoveryOptions: { pollIntervalMs: 10 },
+  });
+  const saved = [];
+
+  const result = await captureUnreadMessages({
+    adapter,
+    outbox: createEmptyOutbox(),
+    saveOutbox: async (value) => {
+      validateOutbox(value);
+      saved.push(structuredClone(value));
+    },
+    unreadUrl,
+    scanStartedAt: new Date('2026-08-19T03:00:00.000Z'),
+    authTimeoutMs: 5_000,
+  });
+
+  assert.deepEqual(result.outbox.entries.map(({ conversationUrl }) => conversationUrl), urls);
+  assert.equal(result.processedConversations, 3);
+  assert.equal(saved.filter(({ entries }) => entries.some(({ state }) => state === 'capture_pending')).length, 3);
+  assert.equal(rowClicks, 0);
+});
+
 browserTest('openConversation prefers a validated direct URL and uses only the exact unread row as fallback', async (page) => {
   const unreadUrl = 'https://www.linkedin.com/messaging/?filter=unread';
   const fixture = await fs.readFile(path.join(fixtures, 'unread-candidates.html'), 'utf8');
@@ -126,6 +297,50 @@ browserTest('anchorless opening fails closed unless exactly one visible matching
     ScanInvariantError,
   );
   assert.equal(page.url(), 'about:blank');
+});
+
+browserTest('revalidateUnreadCandidate fails closed when the exact unread row disappears or changes URL', async (page) => {
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-candidates.html'), 'utf8');
+  await page.setContent(fixture);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+  const [candidate] = await adapter.readUnreadCandidates();
+
+  await page.locator('#human-1').evaluate((row) => row.remove());
+  await assert.rejects(adapter.revalidateUnreadCandidate(candidate), (error) => (
+    error instanceof ScanInvariantError && error.code === 'conversation-row-not-uniquely-visible'
+  ));
+
+  await page.setContent(fixture);
+  await page.locator('#human-1 a').evaluate((anchor) => {
+    anchor.setAttribute('href', '/messaging/thread/changed-thread/');
+  });
+  await assert.rejects(adapter.revalidateUnreadCandidate(candidate), (error) => (
+    error instanceof ScanInvariantError && error.code === 'conversation-row-url-changed'
+  ));
+});
+
+browserTest('revalidateUnreadCandidate rejects a row that became read and returns refreshed metadata', async (page) => {
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-candidates.html'), 'utf8');
+  await page.setContent(fixture);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+  const candidates = await adapter.readUnreadCandidates();
+  const direct = candidates[0];
+
+  await page.locator('#human-1 [aria-label]').evaluate((label) => {
+    label.setAttribute('aria-label', '3 unread messages');
+  });
+  assert.deepEqual(await adapter.revalidateUnreadCandidate(direct), {
+    ...direct,
+    unreadCount: 3,
+  });
+
+  await page.locator('#human-1').evaluate((row) => {
+    row.classList.remove('msg-conversation-listitem--unread');
+    for (const label of row.querySelectorAll('[aria-label]')) label.removeAttribute('aria-label');
+  });
+  await assert.rejects(adapter.revalidateUnreadCandidate(direct), (error) => (
+    error instanceof ScanInvariantError && error.code === 'conversation-row-no-longer-unread'
+  ));
 });
 
 browserTest('direct opening fails closed when navigation lands on a different valid thread', async (page) => {
@@ -457,6 +672,52 @@ browserTest('load-more control fails closed if it is nested in a conversation ro
   `);
   const adapter = new PlaywrightLinkedInAdapter(page);
   await assert.rejects(adapter.hasLoadMore(), ScanInvariantError);
+});
+
+browserTest('loadMore waits for slow measurable list progress and reports inert controls', async (page) => {
+  await page.setContent(`
+    <ul data-reporter-conversation-list style="width:200px;height:80px">
+      <li data-reporter-row-id="row-one" class="msg-conversation-listitem--unread">
+        <h3>One</h3><span aria-label="1 unread message"></span>
+      </li>
+    </ul>
+    <button onclick="setTimeout(() => document.querySelector('ul').insertAdjacentHTML(
+      'beforeend', '&lt;li data-reporter-row-id=&quot;row-two&quot;&gt;Two&lt;/li&gt;'), 1250)">
+      Load more conversations
+    </button>
+  `);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+  const progressed = await adapter.loadMore();
+  assert.equal(progressed.changed, true);
+  assert.notEqual(progressed.before.rowSignature, progressed.after.rowSignature);
+
+  await page.setContent(`
+    <ul data-reporter-conversation-list style="width:200px;height:80px">
+      <li data-reporter-row-id="row-one">One</li>
+    </ul>
+    <button>Load more conversations</button>
+  `);
+  const inert = await adapter.loadMore();
+  assert.equal(inert.changed, false);
+  assert.equal(inert.before.rowSignature, inert.after.rowSignature);
+});
+
+browserTest('scrollList advances by one bounded viewport step and returns row signatures', async (page) => {
+  await page.setContent(`
+    <ul data-reporter-conversation-list style="width:200px;height:100px;overflow:auto;padding:0;margin:0">
+      <li data-reporter-row-id="row-one" style="height:100px">One</li>
+      <li data-reporter-row-id="row-two" style="height:100px">Two</li>
+      <li data-reporter-row-id="row-three" style="height:100px">Three</li>
+    </ul>
+  `);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+
+  const progress = await adapter.scrollList();
+
+  assert.equal(progress.changed, true);
+  assert.ok(progress.after.scrollTop > progress.before.scrollTop);
+  assert.ok(progress.after.scrollTop - progress.before.scrollTop <= progress.before.viewportHeight);
+  assert.notEqual(progress.before.rowSignature, progress.after.rowSignature);
 });
 
 browserTest('hidden stale inbox markup cannot satisfy visible invariants or supply rows', async (page) => {

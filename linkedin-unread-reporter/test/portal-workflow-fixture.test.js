@@ -308,7 +308,13 @@ test('restart recovers a post-open extraction failure by direct URL and delivers
     const adapter = {
       gotoUnread: (...args) => realAdapter.gotoUnread(...args),
       waitForUnblocked: (...args) => realAdapter.waitForUnblocked(...args),
+      inspectState: (...args) => realAdapter.inspectState(...args),
       readUnreadCandidates: (...args) => realAdapter.readUnreadCandidates(...args),
+      revalidateUnreadCandidate: (...args) => realAdapter.revalidateUnreadCandidate(...args),
+      hasLoadMore: (...args) => realAdapter.hasLoadMore(...args),
+      loadMore: (...args) => realAdapter.loadMore(...args),
+      scrollList: (...args) => realAdapter.scrollList(...args),
+      waitForStability: (...args) => realAdapter.waitForStability(...args),
       openConversation: async (candidate, options) => {
         if (candidate.conversationUrl) directOpenUrls.push(candidate.conversationUrl);
         return realAdapter.openConversation(candidate, options);

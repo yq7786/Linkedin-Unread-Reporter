@@ -463,6 +463,116 @@ export class PlaywrightLinkedInAdapter {
     }
   }
 
+  async revalidateUnreadCandidate(candidate) {
+    try {
+      if (typeof candidate?.rowId !== 'string' || !candidate.rowId.trim()) {
+        throw new ScanInvariantError('conversation-row-identity-missing');
+      }
+      const visibleLists = this.page.locator(LIST_SELECTOR).filter({ visible: true });
+      if (await visibleLists.count() !== 1) {
+        throw new ScanInvariantError('conversation-list-not-uniquely-visible');
+      }
+      const escapedRowId = await this.page.evaluate((value) => CSS.escape(value), candidate.rowId);
+      const rowSelector = [
+        `[data-reporter-row-id="${escapedRowId}"]`,
+        `[data-conversation-id="${escapedRowId}"]`,
+        `[data-entity-urn="${escapedRowId}"]`,
+        `[data-control-id="${escapedRowId}"]`,
+        `[id="${escapedRowId}"]`,
+      ].join(',');
+      const rows = visibleLists.first().locator(rowSelector).filter({ visible: true });
+      if (await rows.count() !== 1) {
+        throw new ScanInvariantError('conversation-row-not-uniquely-visible');
+      }
+      const refreshed = await rows.first().evaluate((row) => {
+        const isVisible = (element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && rect.width > 0
+            && rect.height > 0;
+        };
+        const normalized = (value) => (value || '').replace(/\s+/g, ' ').trim();
+        const nameElement = row.querySelector([
+          '[data-reporter-name]',
+          '.msg-conversation-listitem__participant-names',
+          '.msg-conversation-card__participant-names',
+          'h3',
+        ].join(','));
+        const ariaLabels = [row, ...row.querySelectorAll('[aria-label]')]
+          .filter((element) => element.hasAttribute('aria-label'))
+          .map((element) => normalized(element.getAttribute('aria-label')));
+        const unread = row.classList.contains('msg-conversation-listitem--unread')
+          || Boolean(row.querySelector('.msg-conversation-card__convo-item-container--unread'))
+          || ariaLabels.some((label) => /^(?:unread message|\d+ unread messages?)$/i.test(label));
+        const previewSelector = [
+          '[data-preview]',
+          '.msg-conversation-card__message-snippet',
+          '.msg-conversation-listitem__message-snippet',
+        ].join(',');
+        const labels = [row, ...row.querySelectorAll([
+          '[data-reporter-label]', '[aria-label]', 'span', 'div',
+        ].join(','))].filter((element) => (
+          isVisible(element)
+          && !element.closest(previewSelector)
+          && (element.hasAttribute('data-reporter-label')
+            || element.hasAttribute('aria-label')
+            || element.matches('span, div'))
+        )).map((element) => normalized(
+          element.getAttribute('data-reporter-label')
+            || element.getAttribute('aria-label')
+            || element.textContent,
+        ));
+        const excluded = labels.some((label) => (
+          /^(?:group|group chat|group conversation|sponsored|automated|automated conversation)$/i.test(label)
+        ));
+        const countLabels = ariaLabels
+          .map((label) => /^(\d+) unread messages?$/i.exec(label))
+          .filter(Boolean)
+          .map((match) => match[1]);
+        const anchors = [...row.querySelectorAll('a[href]')]
+          .filter(isVisible)
+          .map((anchor) => anchor.getAttribute('href'))
+          .filter((href) => /\/messaging\/thread\//.test(href || ''));
+        return {
+          leadName: normalized(nameElement?.textContent),
+          unread,
+          excluded,
+          countLabels,
+          anchors,
+        };
+      });
+      if (!refreshed.unread) throw new ScanInvariantError('conversation-row-no-longer-unread');
+      if (refreshed.excluded) throw new ScanInvariantError('conversation-row-no-longer-eligible');
+      if (refreshed.countLabels.length > 1 || refreshed.anchors.length > 1) {
+        throw new ScanInvariantError('conversation-row-metadata-ambiguous');
+      }
+      const unreadCount = refreshed.countLabels.length ? Number(refreshed.countLabels[0]) : null;
+      if (unreadCount !== null && (!Number.isSafeInteger(unreadCount) || unreadCount <= 0)) {
+        throw new ScanInvariantError('conversation-unread-count-invalid');
+      }
+      const currentUrl = refreshed.anchors.length
+        ? validateConversationUrl(refreshed.anchors[0])
+        : null;
+      if (candidate.conversationUrl !== null && candidate.conversationUrl !== undefined) {
+        const expectedUrl = validateConversationUrl(candidate.conversationUrl);
+        if (currentUrl !== expectedUrl) {
+          throw new ScanInvariantError('conversation-row-url-changed');
+        }
+      }
+      return {
+        rowId: candidate.rowId.trim(),
+        leadName: normalizeLeadName(refreshed.leadName),
+        unreadCount,
+        conversationUrl: currentUrl,
+      };
+    } catch (error) {
+      if (error instanceof ScanInvariantError || error instanceof MessageDataError) throw error;
+      throw new ScanInvariantError('candidate-revalidation-failed');
+    }
+  }
+
   async openConversation({ rowId, conversationUrl }, { onOpened } = {}) {
     try {
       const hasConversationUrl = conversationUrl !== null && conversationUrl !== undefined;
@@ -899,6 +1009,84 @@ export class PlaywrightLinkedInAdapter {
     return this.page.getByRole('button', { name: /^Load more conversations$/i });
   }
 
+  async listProgressSnapshot() {
+    const snapshot = await this.page.evaluate(({ listSelector, rowSelector }) => {
+      const isVisible = (element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && rect.width > 0
+          && rect.height > 0;
+      };
+      const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
+      if (lists.length !== 1) return { listCount: lists.length };
+      const list = lists[0];
+      const listRect = list.getBoundingClientRect();
+      const visibleRows = [...list.querySelectorAll(rowSelector)].filter((row) => {
+        if (!isVisible(row)) return false;
+        const rect = row.getBoundingClientRect();
+        return rect.bottom > listRect.top && rect.top < listRect.bottom;
+      });
+      const rowSignature = visibleRows.map((row, index) => {
+        const identity = [
+          'data-reporter-row-id', 'data-conversation-id', 'data-entity-urn',
+          'data-control-id', 'id',
+        ].map((attribute) => row.getAttribute(attribute)).find(Boolean) || `anonymous-${index}`;
+        const anchors = [...row.querySelectorAll('a[href]')]
+          .map((anchor) => anchor.getAttribute('href') || '')
+          .sort()
+          .join(',');
+        return `${identity}:${anchors}`;
+      }).join('|');
+      return {
+        listCount: 1,
+        scrollTop: list.scrollTop,
+        scrollHeight: list.scrollHeight,
+        viewportHeight: list.clientHeight,
+        rowCount: list.querySelectorAll(rowSelector).length,
+        rowSignature,
+      };
+    }, { listSelector: LIST_SELECTOR, rowSelector: ROW_SELECTOR });
+    if (snapshot.listCount !== 1) {
+      throw new ScanInvariantError('conversation-list-not-uniquely-visible');
+    }
+    return {
+      scrollTop: snapshot.scrollTop,
+      scrollHeight: snapshot.scrollHeight,
+      viewportHeight: snapshot.viewportHeight,
+      rowCount: snapshot.rowCount,
+      rowSignature: snapshot.rowSignature,
+    };
+  }
+
+  listProgress(before, after) {
+    return {
+      changed: after.rowCount !== before.rowCount
+        || after.scrollHeight !== before.scrollHeight
+        || after.scrollTop !== before.scrollTop
+        || after.rowSignature !== before.rowSignature,
+      before,
+      after,
+    };
+  }
+
+  async waitForListProgress(before, {
+    timeoutMs = 3_000,
+    pollIntervalMs = 100,
+  } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    await this.waitForStability();
+    let after = await this.listProgressSnapshot();
+    let progress = this.listProgress(before, after);
+    while (!progress.changed && Date.now() < deadline) {
+      await this.page.waitForTimeout(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())));
+      after = await this.listProgressSnapshot();
+      progress = this.listProgress(before, after);
+    }
+    return progress;
+  }
+
   async hasLoadMore() {
     const controls = this.loadMoreLocator();
     const count = await controls.count();
@@ -920,32 +1108,13 @@ export class PlaywrightLinkedInAdapter {
     if (!await this.hasLoadMore()) {
       throw new ScanInvariantError('load-more-control-not-safe');
     }
+    const before = await this.listProgressSnapshot();
     await this.loadMoreLocator().first().click();
-    await this.page.waitForTimeout(750);
-    return true;
+    return this.waitForListProgress(before);
   }
 
   async scrollList() {
-    const before = await this.page.evaluate(({ listSelector, rowSelector }) => {
-      const isVisible = (element) => {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
-      if (lists.length !== 1) return { listCount: lists.length };
-      const list = lists[0];
-      return {
-        listCount: 1,
-        rowCount: list.querySelectorAll(rowSelector).length,
-        scrollHeight: list.scrollHeight,
-        scrollTop: list.scrollTop,
-      };
-    }, { listSelector: LIST_SELECTOR, rowSelector: ROW_SELECTOR });
-    if (before.listCount !== 1) {
-      throw new ScanInvariantError('conversation-list-not-uniquely-visible');
-    }
-
+    const before = await this.listProgressSnapshot();
     const scrollTargetCount = await this.page.evaluate(({ listSelector }) => {
       const isVisible = (element) => {
         const style = window.getComputedStyle(element);
@@ -953,38 +1122,19 @@ export class PlaywrightLinkedInAdapter {
         return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
       };
       const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
-      if (lists.length === 1) lists[0].scrollTop = lists[0].scrollHeight;
+      if (lists.length === 1) {
+        const list = lists[0];
+        const step = Math.max(1, Math.floor(list.clientHeight * 0.8));
+        list.scrollTop = Math.min(list.scrollTop + step, list.scrollHeight - list.clientHeight);
+      }
       return lists.length;
     }, { listSelector: LIST_SELECTOR });
     if (scrollTargetCount !== 1) {
       throw new ScanInvariantError('conversation-list-not-uniquely-visible');
     }
-    await this.page.waitForTimeout(750);
-
-    const after = await this.page.evaluate(({ listSelector, rowSelector }) => {
-      const isVisible = (element) => {
-        const style = window.getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
-      };
-      const lists = [...document.querySelectorAll(listSelector)].filter(isVisible);
-      if (lists.length !== 1) return { listCount: lists.length };
-      const list = lists[0];
-      return {
-        listCount: 1,
-        rowCount: list.querySelectorAll(rowSelector).length,
-        scrollHeight: list.scrollHeight,
-        scrollTop: list.scrollTop,
-      };
-    }, { listSelector: LIST_SELECTOR, rowSelector: ROW_SELECTOR });
-    if (after.listCount !== 1) {
-      throw new ScanInvariantError('conversation-list-not-uniquely-visible');
-    }
-    return Boolean(
-      after.rowCount !== before.rowCount
-      || after.scrollHeight !== before.scrollHeight
-      || after.scrollTop !== before.scrollTop
-    );
+    await this.waitForStability();
+    const after = await this.listProgressSnapshot();
+    return this.listProgress(before, after);
   }
 
   async waitForStability() {

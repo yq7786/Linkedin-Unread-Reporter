@@ -14,6 +14,8 @@ import {
 import { validateOutbox } from './outbox.js';
 
 const MAX_CAPTURE_ATTEMPTS = 3;
+const MAX_DISCOVERY_ITERATIONS = 500;
+const REQUIRED_STABLE_DISCOVERY_PASSES = 3;
 const RECOVERABLE_SCAN_CODES = new Set([
   'conversation-thread-not-uniquely-visible',
   'conversation-url-mismatch',
@@ -83,6 +85,64 @@ function normalizeScanStartedAt(value) {
   return value.toISOString();
 }
 
+async function advanceUnreadList(adapter, knownHasLoadMore) {
+  const hasLoadMore = knownHasLoadMore ?? await adapter.hasLoadMore();
+  if (hasLoadMore) {
+    const progress = await adapter.loadMore();
+    if (typeof progress === 'boolean') return progress;
+    if (progress && typeof progress.changed === 'boolean') return progress.changed;
+    throw new ScanInvariantError('conversation-list-progress-invalid');
+  }
+  const progress = await adapter.scrollList();
+  if (typeof progress === 'boolean') return progress;
+  if (progress && typeof progress.changed === 'boolean') return progress.changed;
+  throw new ScanInvariantError('conversation-list-progress-invalid');
+}
+
+async function discoverUnreadCandidate({
+  adapter,
+  processedConversationUrls,
+  processedAnchorlessRowIds,
+  discoveryBudget,
+  signal,
+}) {
+  let stablePasses = 0;
+  const pageExcludedRowIds = new Set(processedAnchorlessRowIds);
+  while (true) {
+    if (discoveryBudget.remaining <= 0) throw new ScanIterationError();
+    discoveryBudget.remaining -= 1;
+    checkpoint(signal);
+    assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
+    const candidates = await checkedAwait(signal, () => adapter.readUnreadCandidates({
+      limit: 50,
+      excludeRowIds: [...pageExcludedRowIds],
+    }));
+    let excludedProcessedCandidate = false;
+    for (const candidate of candidates) {
+      if (candidate.conversationUrl !== null && candidate.conversationUrl !== undefined) {
+        const conversationUrl = validateConversationUrl(candidate.conversationUrl);
+        if (!processedConversationUrls.has(conversationUrl)) return candidate;
+        pageExcludedRowIds.add(candidate.rowId);
+        excludedProcessedCandidate = true;
+      } else if (!processedAnchorlessRowIds.has(candidate.rowId)) {
+        return candidate;
+      }
+    }
+    if (excludedProcessedCandidate) continue;
+
+    assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
+    const changed = await checkedAwait(signal, () => advanceUnreadList(adapter));
+    if (changed) {
+      stablePasses = 0;
+      pageExcludedRowIds.clear();
+      for (const rowId of processedAnchorlessRowIds) pageExcludedRowIds.add(rowId);
+      continue;
+    }
+    stablePasses += 1;
+    if (stablePasses >= REQUIRED_STABLE_DISCOVERY_PASSES) return null;
+  }
+}
+
 function makeCaptureMarker({ leadName, conversationUrl, expectedUnreadCount, firstFailureAt }) {
   const marker = {
     entryId: `capture:${randomUUID()}`,
@@ -96,6 +156,23 @@ function makeCaptureMarker({ leadName, conversationUrl, expectedUnreadCount, fir
     marker.expectedUnreadCount = expectedUnreadCount;
   }
   return marker;
+}
+
+function refreshCaptureMarker(marker, candidate) {
+  const conversationUrl = validateConversationUrl(candidate.conversationUrl);
+  if (conversationUrl !== marker.conversationUrl) {
+    throw new ScanInvariantError('conversation-url-mismatch');
+  }
+  const { expectedUnreadCount: _staleUnreadCount, ...base } = marker;
+  const refreshed = {
+    ...base,
+    leadName: normalizeLeadName(candidate.leadName),
+    conversationUrl,
+  };
+  if (candidate.unreadCount !== null && candidate.unreadCount !== undefined) {
+    refreshed.expectedUnreadCount = candidate.unreadCount;
+  }
+  return refreshed;
 }
 
 function makeMessageEntries({ marker, snapshot, scanStartedAt, outbox }) {
@@ -207,7 +284,11 @@ export async function captureUnreadMessages({
     currentOutbox = nextOutbox;
   };
 
-  const captureMarker = async (marker, { alreadyOpen = false, newMarker = false } = {}) => {
+  const captureMarker = async (marker, {
+    alreadyOpen = false,
+    newMarker = false,
+    initialCandidate = null,
+  } = {}) => {
     let attemptsThisRun = 0;
     while (attemptsThisRun < MAX_CAPTURE_ATTEMPTS) {
       checkpoint(signal);
@@ -215,9 +296,10 @@ export async function captureUnreadMessages({
       let entries;
       try {
         if (!(alreadyOpen && attemptsThisRun === 1)) {
-          await checkedAwait(signal, () => adapter.openConversation({
-            conversationUrl: marker.conversationUrl,
-          }));
+          const openTarget = attemptsThisRun === 1 && initialCandidate
+            ? initialCandidate
+            : { conversationUrl: marker.conversationUrl };
+          await checkedAwait(signal, () => adapter.openConversation(openTarget));
         }
         const snapshot = await checkedAwait(signal, () => adapter.readThreadMessages());
         checkpoint(signal);
@@ -248,12 +330,44 @@ export async function captureUnreadMessages({
     ));
   };
 
+  const openValidatedDirectCandidate = async (initialMarker, initialCandidate) => {
+    let marker = initialMarker;
+    let candidate = initialCandidate;
+    for (let validationAttempt = 0;
+      validationAttempt < MAX_CAPTURE_ATTEMPTS;
+      validationAttempt += 1) {
+      assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
+      const refreshedCandidate = await checkedAwait(
+        signal,
+        () => adapter.revalidateUnreadCandidate(candidate),
+      );
+      const refreshedMarker = refreshCaptureMarker(marker, refreshedCandidate);
+      const markerChanged = refreshedMarker.leadName !== marker.leadName
+        || refreshedMarker.expectedUnreadCount !== marker.expectedUnreadCount;
+      marker = refreshedMarker;
+      candidate = refreshedCandidate;
+      if (markerChanged) {
+        await checkedAwait(signal, () => persist(
+          replaceEntry(currentOutbox, marker.entryId, [marker]),
+        ));
+        continue;
+      }
+      await checkedAwait(signal, () => captureMarker(marker, {
+        newMarker: true,
+        initialCandidate: candidate,
+      }));
+      return marker;
+    }
+    throw new ScanIterationError();
+  };
+
   const recoveryMarkers = currentOutbox.entries
     .filter(({ state }) => state === 'capture_pending')
     .map((entry) => ({ ...entry }));
   const recoveredConversationUrls = new Set(
     recoveryMarkers.map(({ conversationUrl }) => conversationUrl),
   );
+  const processedConversationUrls = new Set(recoveredConversationUrls);
   if (recoverPending) {
     for (const marker of recoveryMarkers) {
       checkpoint(signal);
@@ -263,30 +377,33 @@ export async function captureUnreadMessages({
     }
   }
 
-  const processedRowIds = new Set();
+  const processedAnchorlessRowIds = new Set();
+  const discoveryBudget = { remaining: MAX_DISCOVERY_ITERATIONS };
   let processedNewConversations = 0;
   let truncated = false;
   while (captureNew) {
     checkpoint(signal);
     await checkedAwait(signal, () => adapter.gotoUnread(unreadUrl));
     await checkedAwait(signal, () => adapter.waitForUnblocked(authTimeoutMs));
-    const candidates = await checkedAwait(signal, () => adapter.readUnreadCandidates({
-      limit: 1,
-      excludeRowIds: [...processedRowIds],
-    }));
-    if (candidates.length === 0) break;
-
-    const candidate = candidates[0];
+    const candidate = await discoverUnreadCandidate({
+      adapter,
+      processedConversationUrls,
+      processedAnchorlessRowIds,
+      discoveryBudget,
+      signal,
+    });
+    if (candidate === null) break;
     checkpoint(signal);
-    processedRowIds.add(candidate.rowId);
-    if (candidate.conversationUrl !== null && candidate.conversationUrl !== undefined
-      && recoveredConversationUrls.has(validateConversationUrl(candidate.conversationUrl))) {
-      continue;
+    let candidateConversationUrl = null;
+    if (candidate.conversationUrl !== null && candidate.conversationUrl !== undefined) {
+      candidateConversationUrl = validateConversationUrl(candidate.conversationUrl);
+      if (processedConversationUrls.has(candidateConversationUrl)) continue;
     }
     if (processedNewConversations >= cap) {
       truncated = true;
       break;
     }
+    assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
 
     let marker;
     if (candidate.conversationUrl !== null && candidate.conversationUrl !== undefined) {
@@ -300,29 +417,57 @@ export async function captureUnreadMessages({
         ...currentOutbox,
         entries: [...currentOutbox.entries, marker],
       }));
-      await checkedAwait(signal, () => captureMarker(marker, { newMarker: true }));
+      marker = await openValidatedDirectCandidate(marker, candidate);
     } else {
-      await checkedAwait(signal, () => adapter.openConversation(candidate, {
-        onOpened: async (conversationUrl) => {
-          checkpoint(signal);
-          marker = makeCaptureMarker({
-            leadName: candidate.leadName,
-            conversationUrl,
-            expectedUnreadCount: candidate.unreadCount,
-            firstFailureAt: scanStartedAtIso,
-          });
-          await checkedAwait(signal, () => persist({
-            ...currentOutbox,
-            entries: [...currentOutbox.entries, marker],
-          }));
-        },
-      }));
-      if (!marker) throw new Error('Opened conversation was not checkpointed.');
-      await checkedAwait(signal, () => captureMarker(marker, {
-        alreadyOpen: true,
-        newMarker: true,
-      }));
+      assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
+      let refreshedCandidate = await checkedAwait(
+        signal,
+        () => adapter.revalidateUnreadCandidate(candidate),
+      );
+      if (refreshedCandidate.conversationUrl === null) {
+        assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
+        refreshedCandidate = await checkedAwait(
+          signal,
+          () => adapter.revalidateUnreadCandidate(candidate),
+        );
+      }
+      if (refreshedCandidate.conversationUrl !== null) {
+        marker = makeCaptureMarker({
+          leadName: refreshedCandidate.leadName,
+          conversationUrl: refreshedCandidate.conversationUrl,
+          expectedUnreadCount: refreshedCandidate.unreadCount,
+          firstFailureAt: scanStartedAtIso,
+        });
+        await checkedAwait(signal, () => persist({
+          ...currentOutbox,
+          entries: [...currentOutbox.entries, marker],
+        }));
+        marker = await openValidatedDirectCandidate(marker, refreshedCandidate);
+      } else {
+        await checkedAwait(signal, () => adapter.openConversation(refreshedCandidate, {
+          onOpened: async (conversationUrl) => {
+            checkpoint(signal);
+            marker = makeCaptureMarker({
+              leadName: refreshedCandidate.leadName,
+              conversationUrl,
+              expectedUnreadCount: refreshedCandidate.unreadCount,
+              firstFailureAt: scanStartedAtIso,
+            });
+            await checkedAwait(signal, () => persist({
+              ...currentOutbox,
+              entries: [...currentOutbox.entries, marker],
+            }));
+          },
+        }));
+        if (!marker) throw new Error('Opened conversation was not checkpointed.');
+        await checkedAwait(signal, () => captureMarker(marker, {
+          alreadyOpen: true,
+          newMarker: true,
+        }));
+        processedAnchorlessRowIds.add(candidate.rowId);
+      }
     }
+    processedConversationUrls.add(marker.conversationUrl);
     checkpoint(signal);
     processedConversations += 1;
     processedNewConversations += 1;
@@ -389,13 +534,7 @@ export async function scanUnreadConversations({
       };
     }
 
-    if (hasLoadMore) {
-      stablePasses = 0;
-      await adapter.loadMore();
-      continue;
-    }
-
-    const changed = await adapter.scrollList();
+    const changed = await advanceUnreadList(adapter, hasLoadMore);
     if (changed) {
       stablePasses = 0;
       continue;
@@ -408,7 +547,6 @@ export async function scanUnreadConversations({
         truncated: false,
       };
     }
-    await adapter.waitForStability?.();
   }
 
   throw new ScanIterationError();
