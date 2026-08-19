@@ -46,6 +46,7 @@ function portalMessage(overrides = {}) {
 const capturePending = {
   entryId: 'entry-pending',
   state: 'capture_pending',
+  recoveryMode: 'direct',
   leadName: 'Pending Lead',
   conversationUrl: 'https://www.linkedin.com/messaging/thread/pending-thread/',
   expectedUnreadCount: 1,

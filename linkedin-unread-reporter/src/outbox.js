@@ -5,8 +5,12 @@ import properLockfile from 'proper-lockfile';
 import { readPrivateFile } from './private-file.js';
 
 const COMMON_FIELDS = ['entryId', 'state', 'leadName', 'conversationUrl'];
+const CAPTURE_MARKER_BASE_FIELDS = [
+  ...COMMON_FIELDS, 'expectedUnreadCount', 'firstFailureAt', 'attemptCount',
+];
 const ENTRY_FIELDS = {
-  capture_pending: new Set([...COMMON_FIELDS, 'expectedUnreadCount', 'firstFailureAt', 'attemptCount']),
+  preopen_pending: new Set(CAPTURE_MARKER_BASE_FIELDS),
+  capture_pending: new Set([...CAPTURE_MARKER_BASE_FIELDS, 'recoveryMode']),
   timestamp_pending: new Set([
     ...COMMON_FIELDS, 'linkedinMessageId', 'contentType', 'content', 'sentAtRaw', 'scanStartedAt',
   ]),
@@ -83,14 +87,18 @@ function validateCommonFields(entry) {
     || !isCanonicalConversationUrl(entry.conversationUrl)) invalid();
 }
 
-function validateCapturePending(entry) {
-  if (!hasExactFields(entry, ENTRY_FIELDS.capture_pending)
+function validateCaptureMarker(entry) {
+  if (!hasExactFields(entry, ENTRY_FIELDS[entry.state])
     || !isIsoTimestamp(entry.firstFailureAt)
     || !Number.isInteger(entry.attemptCount)
     || entry.attemptCount < 1) invalid();
   if (Object.hasOwn(entry, 'expectedUnreadCount')
     && entry.expectedUnreadCount !== null
     && (!Number.isInteger(entry.expectedUnreadCount) || entry.expectedUnreadCount < 1)) invalid();
+  // A missing mode is accepted only so startup can migrate legacy markers safely.
+  if (entry.state === 'capture_pending'
+    && Object.hasOwn(entry, 'recoveryMode')
+    && entry.recoveryMode !== 'direct') invalid();
 }
 
 function validateMessageFields(entry) {
@@ -119,7 +127,9 @@ function validateEntry(entry) {
     || typeof entry.state !== 'string'
     || !Object.hasOwn(ENTRY_FIELDS, entry.state)) invalid();
   validateCommonFields(entry);
-  if (entry.state === 'capture_pending') validateCapturePending(entry);
+  if (entry.state === 'preopen_pending' || entry.state === 'capture_pending') {
+    validateCaptureMarker(entry);
+  }
   if (entry.state === 'timestamp_pending') validateTimestampPending(entry);
   if (entry.state === 'ready') validateReady(entry);
 }

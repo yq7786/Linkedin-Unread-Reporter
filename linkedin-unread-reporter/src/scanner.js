@@ -143,10 +143,16 @@ async function discoverUnreadCandidate({
   }
 }
 
-function makeCaptureMarker({ leadName, conversationUrl, expectedUnreadCount, firstFailureAt }) {
+function makeCaptureMarker({
+  leadName,
+  conversationUrl,
+  expectedUnreadCount,
+  firstFailureAt,
+  state = 'capture_pending',
+}) {
   const marker = {
     entryId: `capture:${randomUUID()}`,
-    state: 'capture_pending',
+    state,
     leadName: normalizeLeadName(leadName),
     conversationUrl: validateConversationUrl(conversationUrl),
     firstFailureAt,
@@ -155,6 +161,7 @@ function makeCaptureMarker({ leadName, conversationUrl, expectedUnreadCount, fir
   if (expectedUnreadCount !== null && expectedUnreadCount !== undefined) {
     marker.expectedUnreadCount = expectedUnreadCount;
   }
+  if (state === 'capture_pending') marker.recoveryMode = 'direct';
   return marker;
 }
 
@@ -284,6 +291,22 @@ export async function captureUnreadMessages({
     currentOutbox = nextOutbox;
   };
 
+  if (currentOutbox.entries.some((entry) => (
+    entry.state === 'preopen_pending'
+    || (entry.state === 'capture_pending' && !Object.hasOwn(entry, 'recoveryMode'))
+  ))) {
+    await checkedAwait(signal, () => persist({
+      ...currentOutbox,
+      entries: currentOutbox.entries
+        .filter(({ state }) => state !== 'preopen_pending')
+        .map((entry) => (
+          entry.state === 'capture_pending' && !Object.hasOwn(entry, 'recoveryMode')
+            ? { ...entry, recoveryMode: 'direct' }
+            : entry
+        )),
+    }));
+  }
+
   const captureMarker = async (marker, {
     alreadyOpen = false,
     newMarker = false,
@@ -299,7 +322,10 @@ export async function captureUnreadMessages({
           const openTarget = attemptsThisRun === 1 && initialCandidate
             ? initialCandidate
             : { conversationUrl: marker.conversationUrl };
-          await checkedAwait(signal, () => adapter.openConversation(openTarget));
+          await checkedAwait(
+            signal,
+            () => adapter.openConversation(openTarget),
+          );
         }
         const snapshot = await checkedAwait(signal, () => adapter.readThreadMessages());
         checkpoint(signal);
@@ -333,32 +359,66 @@ export async function captureUnreadMessages({
   const openValidatedDirectCandidate = async (initialMarker, initialCandidate) => {
     let marker = initialMarker;
     let candidate = initialCandidate;
-    for (let validationAttempt = 0;
-      validationAttempt < MAX_CAPTURE_ATTEMPTS;
-      validationAttempt += 1) {
+    try {
+      let stable = false;
+      for (let validationAttempt = 0;
+        validationAttempt < MAX_CAPTURE_ATTEMPTS;
+        validationAttempt += 1) {
+        assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
+        const refreshedCandidate = await checkedAwait(
+          signal,
+          () => adapter.revalidateUnreadCandidate(candidate),
+        );
+        const refreshedMarker = refreshCaptureMarker(marker, refreshedCandidate);
+        const markerChanged = refreshedMarker.leadName !== marker.leadName
+          || refreshedMarker.expectedUnreadCount !== marker.expectedUnreadCount;
+        marker = refreshedMarker;
+        candidate = refreshedCandidate;
+        if (markerChanged) {
+          await checkedAwait(signal, () => persist(
+            replaceEntry(currentOutbox, marker.entryId, [marker]),
+          ));
+          continue;
+        }
+        stable = true;
+        break;
+      }
+      if (!stable) throw new ScanIterationError();
+    } catch (error) {
+      await checkedAwait(signal, () => persist(
+        replaceEntry(currentOutbox, marker.entryId, []),
+      ));
+      throw error;
+    }
+
+    let finalCandidate;
+    try {
       assertUnreadListInvariants(await checkedAwait(signal, () => adapter.inspectState()));
-      const refreshedCandidate = await checkedAwait(
+      finalCandidate = await checkedAwait(
         signal,
         () => adapter.revalidateUnreadCandidate(candidate),
       );
-      const refreshedMarker = refreshCaptureMarker(marker, refreshedCandidate);
-      const markerChanged = refreshedMarker.leadName !== marker.leadName
-        || refreshedMarker.expectedUnreadCount !== marker.expectedUnreadCount;
-      marker = refreshedMarker;
-      candidate = refreshedCandidate;
-      if (markerChanged) {
-        await checkedAwait(signal, () => persist(
-          replaceEntry(currentOutbox, marker.entryId, [marker]),
-        ));
-        continue;
+      const finalMarker = refreshCaptureMarker(marker, finalCandidate);
+      if (finalMarker.leadName !== marker.leadName
+        || finalMarker.expectedUnreadCount !== marker.expectedUnreadCount) {
+        throw new ScanInvariantError('candidate-revalidation-failed');
       }
-      await checkedAwait(signal, () => captureMarker(marker, {
-        newMarker: true,
-        initialCandidate: candidate,
-      }));
-      return marker;
+    } catch (error) {
+      await checkedAwait(signal, () => persist(
+        replaceEntry(currentOutbox, marker.entryId, []),
+      ));
+      throw error;
     }
-    throw new ScanIterationError();
+
+    marker = { ...marker, state: 'capture_pending', recoveryMode: 'direct' };
+    await checkedAwait(signal, () => persist(
+      replaceEntry(currentOutbox, marker.entryId, [marker]),
+    ));
+    await checkedAwait(signal, () => captureMarker(marker, {
+      newMarker: true,
+      initialCandidate: finalCandidate,
+    }));
+    return marker;
   };
 
   const recoveryMarkers = currentOutbox.entries
@@ -412,6 +472,7 @@ export async function captureUnreadMessages({
         conversationUrl: candidate.conversationUrl,
         expectedUnreadCount: candidate.unreadCount,
         firstFailureAt: scanStartedAtIso,
+        state: 'preopen_pending',
       });
       await checkedAwait(signal, () => persist({
         ...currentOutbox,
@@ -437,6 +498,7 @@ export async function captureUnreadMessages({
           conversationUrl: refreshedCandidate.conversationUrl,
           expectedUnreadCount: refreshedCandidate.unreadCount,
           firstFailureAt: scanStartedAtIso,
+          state: 'preopen_pending',
         });
         await checkedAwait(signal, () => persist({
           ...currentOutbox,

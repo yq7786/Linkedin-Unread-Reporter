@@ -135,7 +135,7 @@ function captureOptions(adapter, overrides = {}) {
   };
 }
 
-test('captureUnreadMessages persists a direct-URL recovery marker before opening a new thread', async () => {
+test('captureUnreadMessages promotes a direct-URL marker immediately before opening a new thread', async () => {
   const events = [];
   const adapter = new CaptureAdapter({
     candidates: [candidate('one')],
@@ -159,12 +159,14 @@ test('captureUnreadMessages persists a direct-URL recovery marker before opening
 
   assert.deepEqual(events.map(([type]) => type), [
     'gotoUnread', 'waitForUnblocked', 'readUnreadCandidates',
-    'saveOutbox', 'openConversation', 'readThreadMessages', 'saveOutbox',
+    'saveOutbox', 'saveOutbox', 'openConversation', 'readThreadMessages', 'saveOutbox',
     'gotoUnread', 'waitForUnblocked', 'readUnreadCandidates',
     'readUnreadCandidates', 'readUnreadCandidates',
   ]);
-  assert.equal(saved[0].entries[0].state, 'capture_pending');
-  assert.equal(saved[1].entries[0].state, 'ready');
+  assert.equal(saved[0].entries[0].state, 'preopen_pending');
+  assert.equal(saved[1].entries[0].state, 'capture_pending');
+  assert.equal(saved[1].entries[0].recoveryMode, 'direct');
+  assert.equal(saved[2].entries[0].state, 'ready');
 });
 
 test('captureUnreadMessages stops before discovery when a row or detail is active', async () => {
@@ -254,8 +256,9 @@ test('captureUnreadMessages rechecks after checkpointing immediately before dire
   ));
 
   assert.equal(adapter.openCalls, 0);
-  assert.equal(saved.length, 1);
-  assert.equal(saved[0].entries[0].state, 'capture_pending');
+  assert.equal(saved.length, 2);
+  assert.equal(saved[0].entries[0].state, 'preopen_pending');
+  assert.deepEqual(saved[1].entries, []);
 });
 
 test('captureUnreadMessages safely loads and rediscovers virtualized candidates without stale rows', async () => {
@@ -443,7 +446,7 @@ test('captureUnreadMessages excludes a processed anchorless row identity and ter
   assert.equal(result.processedConversations, 1);
 });
 
-test('captureUnreadMessages retains a direct marker and does not open when revalidation fails', async () => {
+test('captureUnreadMessages removes a direct pre-open marker and does not open when revalidation fails', async () => {
   for (const code of [
     'conversation-row-not-uniquely-visible',
     'conversation-row-no-longer-unread',
@@ -458,9 +461,93 @@ test('captureUnreadMessages retains a direct marker and does not open when reval
     ));
 
     assert.equal(adapter.openCalls, 0);
-    assert.equal(saved.length, 1);
-    assert.equal(saved[0].entries[0].state, 'capture_pending');
+    assert.equal(saved.length, 2);
+    assert.equal(saved[0].entries[0].state, 'preopen_pending');
+    assert.deepEqual(saved[1].entries, []);
   }
+});
+
+test('captureUnreadMessages discards stale pre-open markers and rediscovers the unread row normally', async () => {
+  const url = threadUrl('preopen-restart');
+  const marker = {
+    entryId: 'capture:preopen-restart',
+    state: 'preopen_pending',
+    leadName: 'Pre-open Restart',
+    conversationUrl: url,
+    expectedUnreadCount: 1,
+    firstFailureAt: '2026-08-19T03:00:00.000Z',
+    attemptCount: 1,
+  };
+  const adapter = new CaptureAdapter({
+    candidates: [candidate('preopen-restart')],
+    snapshots: {
+      [url]: {
+        conversationUrl: url,
+        unreadBoundaryIndex: 0,
+        messages: [message('rediscovered')],
+      },
+    },
+  });
+  const { options, saved } = captureOptions(adapter, {
+    outbox: { version: 1, entries: [marker] },
+    recoverPending: true,
+    captureNew: true,
+  });
+
+  const result = await captureUnreadMessages(options);
+
+  assert.equal(adapter.openCalls, 1);
+  assert.equal(result.pendingRecovery, 0);
+  assert.equal(result.outbox.entries[0].content, 'rediscovered');
+  assert.deepEqual(saved[0], { version: 1, entries: [] });
+});
+
+test('captureUnreadMessages counts only capture-pending markers as recovery', async () => {
+  const preopen = {
+    entryId: 'capture:preopen-count',
+    state: 'preopen_pending',
+    leadName: 'Pre-open Count',
+    conversationUrl: threadUrl('preopen-count'),
+    firstFailureAt: '2026-08-19T03:00:00.000Z',
+    attemptCount: 1,
+  };
+  const recovery = {
+    ...preopen,
+    entryId: 'capture:recovery-count',
+    state: 'capture_pending',
+    leadName: 'Recovery Count',
+    conversationUrl: threadUrl('recovery-count'),
+  };
+  const adapter = new CaptureAdapter();
+  const { options } = captureOptions(adapter, {
+    outbox: { version: 1, entries: [preopen, recovery] },
+    recoverPending: false,
+    captureNew: false,
+  });
+
+  const result = await captureUnreadMessages(options);
+
+  assert.equal(result.pendingRecovery, 1);
+  assert.deepEqual(result.outbox.entries, [{ ...recovery, recoveryMode: 'direct' }]);
+  assert.equal(adapter.openCalls, 0);
+});
+
+test('captureUnreadMessages propagates a failed pre-open marker removal save', async () => {
+  const adapter = new CaptureAdapter({ candidates: [candidate('remove-save-failure')] });
+  adapter.revalidateUnreadCandidate = async () => {
+    throw new ScanInvariantError('conversation-row-no-longer-unread');
+  };
+  const saveFailure = new Error('pre-open cleanup save failed');
+  let saveCalls = 0;
+  const { options } = captureOptions(adapter);
+  options.saveOutbox = async (value) => {
+    validateOutbox(value);
+    saveCalls += 1;
+    if (saveCalls === 2) throw saveFailure;
+  };
+
+  await assert.rejects(captureUnreadMessages(options), (error) => error === saveFailure);
+  assert.equal(adapter.openCalls, 0);
 });
 
 test('captureUnreadMessages revalidates anchorless candidates before opening', async () => {
@@ -571,9 +658,156 @@ test('captureUnreadMessages rechecks after refreshed-marker persistence and stop
     await assert.rejects(captureUnreadMessages(options), ScanInvariantError);
 
     assert.equal(adapter.openCalls, 0);
-    assert.equal(saved.at(-1).entries[0].state, 'capture_pending');
-    assert.equal(saved.at(-1).entries[0].leadName, 'After Save');
+    assert.deepEqual(saved.at(-1).entries, []);
+    assert.equal(saved.at(-2).entries[0].state, 'preopen_pending');
+    assert.equal(saved.at(-2).entries[0].leadName, 'After Save');
   }
+});
+
+test('captureUnreadMessages removes pre-open intent when final revalidation fails', async () => {
+  const row = candidate('final-race');
+  const adapter = new CaptureAdapter({ candidates: [row] });
+  let revalidations = 0;
+  adapter.revalidateUnreadCandidate = async () => {
+    revalidations += 1;
+    if (revalidations === 1) return structuredClone(row);
+    throw new ScanInvariantError('conversation-row-no-longer-unread');
+  };
+  const { options, saved } = captureOptions(adapter);
+
+  await assert.rejects(captureUnreadMessages(options), (error) => (
+    error instanceof ScanInvariantError
+      && error.code === 'conversation-row-no-longer-unread'
+  ));
+
+  assert.equal(adapter.openCalls, 0);
+  assert.deepEqual(saved.map(({ entries }) => entries[0]?.state ?? null), [
+    'preopen_pending',
+    null,
+  ]);
+
+  const restartedAdapter = new CaptureAdapter({
+    snapshots: {
+      [row.conversationUrl]: {
+        conversationUrl: row.conversationUrl,
+        unreadBoundaryIndex: 0,
+        messages: [message('must-not-recover')],
+      },
+    },
+  });
+  const restart = captureOptions(restartedAdapter, {
+    outbox: saved.at(-1),
+    recoverPending: true,
+    captureNew: false,
+  });
+  await captureUnreadMessages(restart.options);
+  assert.equal(restartedAdapter.openCalls, 0);
+});
+
+test('captureUnreadMessages does not open when direct-intent promotion fails', async () => {
+  const row = candidate('promotion-save-failure');
+  const adapter = new CaptureAdapter({ candidates: [row] });
+  const saveFailure = new Error('direct intent save failed');
+  let saveCalls = 0;
+  const { options } = captureOptions(adapter);
+  const durable = [];
+  options.saveOutbox = async (value) => {
+    validateOutbox(value);
+    saveCalls += 1;
+    if (saveCalls === 2) throw saveFailure;
+    durable.push(structuredClone(value));
+  };
+
+  await assert.rejects(captureUnreadMessages(options), (error) => error === saveFailure);
+  assert.equal(adapter.openCalls, 0);
+  assert.equal(durable.at(-1).entries[0].state, 'preopen_pending');
+
+  const restartedAdapter = new CaptureAdapter({ candidates: [] });
+  const restart = captureOptions(restartedAdapter, {
+    outbox: durable.at(-1),
+    recoverPending: true,
+    captureNew: false,
+  });
+  const restarted = await captureUnreadMessages(restart.options);
+  assert.equal(restartedAdapter.openCalls, 0);
+  assert.deepEqual(restarted.outbox.entries, []);
+});
+
+test('captureUnreadMessages directly recovers an ambiguous post-commit promotion failure', async () => {
+  const row = candidate('promotion-post-commit-failure');
+  const adapter = new CaptureAdapter({ candidates: [row] });
+  const ambiguousFailure = new Error('save failed after durable rename');
+  let durable;
+  const { options } = captureOptions(adapter);
+  options.saveOutbox = async (value) => {
+    validateOutbox(value);
+    if (value.entries[0]?.state === 'capture_pending') {
+      durable = structuredClone(value);
+      throw ambiguousFailure;
+    }
+  };
+
+  await assert.rejects(captureUnreadMessages(options), (error) => error === ambiguousFailure);
+  assert.equal(adapter.openCalls, 0);
+  assert.equal(durable.entries[0].recoveryMode, 'direct');
+
+  const restartedAdapter = new CaptureAdapter({
+    snapshots: {
+      [row.conversationUrl]: {
+        conversationUrl: row.conversationUrl,
+        unreadBoundaryIndex: 0,
+        messages: [message('post-commit-recovered')],
+      },
+    },
+  });
+  const restart = captureOptions(restartedAdapter, {
+    outbox: durable,
+    recoverPending: true,
+    captureNew: false,
+  });
+
+  const restarted = await captureUnreadMessages(restart.options);
+
+  assert.equal(restartedAdapter.openCalls, 1);
+  assert.equal(restartedAdapter.gotoCalls, 0);
+  assert.equal(restarted.processedConversations, 1);
+  assert.equal(restarted.outbox.entries[0].content, 'post-commit-recovered');
+});
+
+test('captureUnreadMessages directly recovers a crash after durable direct intent', async () => {
+  const row = candidate('promotion-crash');
+  const crash = new Error('browser crashed before navigation');
+  const crashedAdapter = new CaptureAdapter({ candidates: [row] });
+  crashedAdapter.openConversation = async () => { throw crash; };
+  const crashed = captureOptions(crashedAdapter);
+
+  await assert.rejects(captureUnreadMessages(crashed.options), (error) => error === crash);
+  const durable = crashed.saved.at(-1);
+  assert.equal(durable.entries[0].state, 'capture_pending');
+  assert.equal(durable.entries[0].recoveryMode, 'direct');
+
+  const adapter = new CaptureAdapter({
+    snapshots: {
+      [row.conversationUrl]: {
+        conversationUrl: row.conversationUrl,
+        unreadBoundaryIndex: 0,
+        messages: [message('promotion-crash')],
+      },
+    },
+  });
+  const { options, saved } = captureOptions(adapter, {
+    outbox: durable,
+    recoverPending: true,
+    captureNew: false,
+  });
+
+  const result = await captureUnreadMessages(options);
+
+  assert.equal(adapter.gotoCalls, 0);
+  assert.equal(adapter.revalidateCalls, 0);
+  assert.equal(adapter.openCalls, 1);
+  assert.equal(saved[0].entries[0].state, 'ready');
+  assert.equal(result.outbox.entries[0].state, 'ready');
 });
 
 test('captureUnreadMessages promotes a newly anchored candidate and checkpoints before direct navigation', async () => {
@@ -591,7 +825,10 @@ test('captureUnreadMessages promotes a newly anchored candidate and checkpoints 
     },
     events,
   });
-  adapter.revalidateUnreadCandidate = async () => structuredClone(promoted);
+  adapter.revalidateUnreadCandidate = async () => {
+    events.push(['revalidate']);
+    return structuredClone(promoted);
+  };
   const { options } = captureOptions(adapter);
   options.saveOutbox = async (value) => {
     validateOutbox(value);
@@ -600,6 +837,13 @@ test('captureUnreadMessages promotes a newly anchored candidate and checkpoints 
 
   const result = await captureUnreadMessages(options);
 
+  assert.deepEqual(events.filter(([type]) => type === 'saveOutbox').map(([, state]) => state), [
+    'preopen_pending', 'capture_pending', 'ready',
+  ]);
+  const finalRevalidationIndex = events.findLastIndex(([type]) => type === 'revalidate');
+  assert.deepEqual(events.slice(finalRevalidationIndex, finalRevalidationIndex + 3).map(([type]) => type), [
+    'revalidate', 'saveOutbox', 'openConversation',
+  ]);
   const saveIndex = events.findIndex(([type, state]) => type === 'saveOutbox' && state === 'capture_pending');
   const openIndex = events.findIndex(([type]) => type === 'openConversation');
   assert.ok(saveIndex >= 0 && saveIndex < openIndex);
@@ -687,6 +931,7 @@ test('captureUnreadMessages leaves an anchorless marker durable if opening crash
 
   assert.equal(durable.length, 1);
   assert.equal(durable[0].entries[0].state, 'capture_pending');
+  assert.equal(durable[0].entries[0].recoveryMode, 'direct');
   assert.equal(durable[0].entries[0].conversationUrl, threadUrl('crash'));
 });
 
@@ -797,6 +1042,7 @@ test('captureUnreadMessages retries a direct URL three times then retains captur
   assert.equal(adapter.openCalls, 3);
   assert.equal(saved[0].entries[0].attemptCount, 1);
   assert.equal(result.outbox.entries[0].state, 'capture_pending');
+  assert.equal(result.outbox.entries[0].recoveryMode, 'direct');
   assert.equal(result.outbox.entries[0].expectedUnreadCount, 2);
   assert.equal(result.outbox.entries[0].attemptCount, 3);
   assert.equal(result.pendingRecovery, 1);
@@ -865,8 +1111,10 @@ test('captureUnreadMessages propagates blockers, browser closure, and unexpected
     await assert.rejects(captureUnreadMessages(options), (actual) => actual === error);
 
     assert.equal(adapter.openCalls, 1);
-    assert.equal(saved.length, 1);
-    assert.equal(saved[0].entries[0].state, 'capture_pending');
+    assert.equal(saved.length, 2);
+    assert.equal(saved[0].entries[0].state, 'preopen_pending');
+    assert.equal(saved[1].entries[0].state, 'capture_pending');
+    assert.equal(saved[1].entries[0].recoveryMode, 'direct');
   }
 });
 
@@ -1003,7 +1251,7 @@ test('captureUnreadMessages propagates a replacement checkpoint failure without 
   options.saveOutbox = async (value) => {
     validateOutbox(value);
     saveCalls += 1;
-    if (saveCalls === 2) throw checkpointError;
+    if (saveCalls === 3) throw checkpointError;
   };
 
   await assert.rejects(captureUnreadMessages(options), checkpointError);
@@ -1033,6 +1281,7 @@ test('captureUnreadMessages processes stored recovery markers before discovering
   const marker = {
     entryId: 'capture:recovery',
     state: 'capture_pending',
+    recoveryMode: 'direct',
     leadName: 'Recovery Person',
     conversationUrl: recoveryUrl,
     expectedUnreadCount: 1,
@@ -1049,7 +1298,7 @@ test('captureUnreadMessages processes stored recovery markers before discovering
   assert.equal(result.processedConversations, 2);
 });
 
-test('captureUnreadMessages can run recovery without unread discovery', async () => {
+test('captureUnreadMessages migrates legacy post-open markers to direct recovery', async () => {
   const url = threadUrl('recovery-only');
   const marker = {
     entryId: 'capture-recovery-only',
@@ -1088,6 +1337,7 @@ test('captureUnreadMessages can discover new rows without retrying recovery mark
   const marker = {
     entryId: 'capture-new-only',
     state: 'capture_pending',
+    recoveryMode: 'direct',
     leadName: 'Pending Recovery',
     conversationUrl: threadUrl('pending-recovery'),
     expectedUnreadCount: 1,
@@ -1125,8 +1375,9 @@ test('captureUnreadMessages stops after a lock abort during browser opening', as
 
   assert.equal(adapter.openCalls, 1);
   assert.equal(threadReads, 0);
-  assert.equal(saved.length, 1);
-  assert.equal(saved[0].entries[0].state, 'capture_pending');
+  assert.equal(saved.length, 2);
+  assert.equal(saved[0].entries[0].state, 'preopen_pending');
+  assert.equal(saved[1].entries[0].state, 'capture_pending');
 });
 
 test('captureUnreadMessages gives lock compromise precedence when browser opening rejects', async () => {
@@ -1144,7 +1395,7 @@ test('captureUnreadMessages gives lock compromise precedence when browser openin
   await assert.rejects(captureUnreadMessages(options), compromise);
 
   assert.equal(threadReads, 0);
-  assert.equal(saved.length, 1);
+  assert.equal(saved.length, 2);
 });
 
 test('captureUnreadMessages does not reopen a new candidate matching a processed recovery URL', async () => {
@@ -1152,6 +1403,7 @@ test('captureUnreadMessages does not reopen a new candidate matching a processed
   const marker = {
     entryId: 'capture:same-recovery',
     state: 'capture_pending',
+    recoveryMode: 'direct',
     leadName: 'Recovery Person',
     conversationUrl: url,
     expectedUnreadCount: 1,

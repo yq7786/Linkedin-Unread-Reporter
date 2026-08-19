@@ -35,9 +35,10 @@ An existing `SLACK_WEBHOOK_URL` remains untouched but is ignored. Slack delivery
 
 The reporter uses one gitignored atomic JSON outbox with file mode `0600`. It contains only undelivered work and is rewritten atomically after every state transition. A single-run lock prevents concurrent scheduled executions from modifying it simultaneously.
 
-Outbox entries have one of three states:
+Outbox entries have one of four states:
 
-- `capture_pending`: a conversation was opened but message extraction was not checkpointed successfully;
+- `preopen_pending`: a direct-URL candidate is durably checkpointed but is not known to have opened; it is discard-only and never eligible for direct recovery;
+- `capture_pending`: durable at-least-once direct intent exists and `recoveryMode` is `direct`;
 - `timestamp_pending`: message content is durable, but one or more relative timestamps still need normalization; or
 - `ready`: complete message records are ready for portal delivery.
 
@@ -51,7 +52,11 @@ The scanner identifies at most 50 eligible one-to-one human rows. For each row i
 
 ### 4. One-conversation-at-a-time capture
 
-The reporter processes one row at a time rather than retaining live row handles. Before opening, it safely extracts and validates the row itself when it is an anchor, descendant visible or hidden anchors, and allowlisted stable destination attributes; preview text is never a destination source. If the row truly exposes no destination, it clicks that row and polls the existing visible blocker classifier within the bounded authentication timeout. After blocker recovery it returns to unread, re-resolves the exact unread candidate, and clicks again. A canonical thread URL is accepted only while the same uniquely visible conversation list identifies the clicked stable row as its sole active row. The marker is then persisted before readiness or extraction. If responsive markup removes the list, or recovery finds the row read or missing, the reporter fails closed with no marker. This truly anchorless path retains a narrow unavoidable crash window between click and marker persistence. It never sends a LinkedIn message, edits content, follows attachment links, or downloads media.
+The reporter processes one row at a time rather than retaining live row handles. Before opening, it safely extracts and validates the row itself when it is an anchor, descendant visible or hidden anchors, and allowlisted stable destination attributes; preview text is never a destination source. A direct-URL candidate is first persisted as `preopen_pending` with safe identity and count metadata. Metadata stabilization continues while the marker remains pre-open. The reporter then performs the final list-and-exact-candidate revalidation as its last external observation. A conclusive failure removes `preopen_pending`. A success atomically replaces it with `capture_pending` and `recoveryMode: direct`, after which navigation is invoked immediately with no intervening awaited revalidation or persistence. If promotion fails before the atomic rename commits, navigation is not invoked and the remaining `preopen_pending` is discarded on the next capture run before ordinary unread discovery. If an error or abort is observed after rename or directory synchronization, navigation is still not invoked in that run but disk may already contain `capture_pending/direct`; startup therefore direct-recovers it at least once.
+
+LinkedIn navigation and the local outbox cannot be committed atomically across two systems. The design therefore chooses explicit at-least-once intent based on the last verified eligibility observation. A crash after promotion but before or during navigation is recovered directly, preventing message loss. LinkedIn may change external row state after the final observation, or a crash may lead to duplicate capture, but stable message IDs and fallback Portal idempotency keys mitigate duplicates. Legacy mode-less `capture_pending` entries are conservatively treated as already-open work and atomically migrated to `direct` before URL recovery.
+
+If the row truly exposes no destination, the reporter clicks that row and polls the existing visible blocker classifier within the bounded authentication timeout. After blocker recovery it returns to unread, re-resolves the exact unread candidate, and clicks again. A canonical thread URL is accepted only while the same uniquely visible conversation list identifies the clicked stable row as its sole active row. `onOpened` then persists `capture_pending` with `recoveryMode: direct` before readiness or extraction. If responsive markup removes the list, or recovery finds the row read or missing, the reporter fails closed with no recovery marker. This truly anchorless path retains a narrow unavoidable crash window between click and marker persistence. It never sends a LinkedIn message, edits content, follows attachment links, or downloads media.
 
 Unread-message selection follows this order:
 
@@ -68,10 +73,11 @@ If extraction fails after a thread is opened, the reporter retries by navigating
 - displayed lead name;
 - validated conversation URL;
 - expected unread count when available;
-- first failure time; and
-- attempt count.
+- first failure time;
+- attempt count; and
+- recovery mode (`direct`).
 
-The marker contains no message content because extraction did not succeed. At the beginning of later scheduled runs, recovery markers are processed before new unread rows. On success the marker is atomically replaced by normal message records; on continued failure it remains for the next run. If no reliable unread count was saved, recovery captures only the newest inbound message.
+The marker contains no message content because extraction did not succeed. At the beginning of later scheduled runs, stale `preopen_pending` entries are discarded first, legacy mode-less capture markers become `direct`, and then every `capture_pending` marker is recovered through its canonical URL before new unread rows. On success the marker is atomically replaced by normal message records; on continued failure it remains `direct` for the next run. If no reliable unread count was saved, recovery captures only the newest inbound message.
 
 ### 6. Timestamp normalization
 
@@ -131,7 +137,7 @@ Each run performs these stages in order:
 1. Acquire the single-run lock.
 2. Load and validate the private outbox.
 3. Deliver existing `ready` records. If this delivery receives a network error or non-2xx response, stop before opening new LinkedIn conversations.
-4. Retry `capture_pending` markers through their direct URLs.
+4. Atomically discard stale `preopen_pending` markers, migrate legacy capture markers to `direct`, and recover every `capture_pending` marker through its canonical URL.
 5. Normalize existing `timestamp_pending` records.
 6. Discover and process up to 50 new unread one-to-one conversations, checkpointing each immediately.
 7. Normalize newly captured relative timestamps.
@@ -179,9 +185,9 @@ Tests and sanitized fixtures must cover:
 - exact versus estimated timestamp accuracy;
 - stable-message-ID and fallback SHA-256 idempotency keys;
 - atomic per-conversation checkpointing;
-- `capture_pending`, `timestamp_pending`, and `ready` outbox transitions;
+- `preopen_pending`, `capture_pending`, `timestamp_pending`, and `ready` outbox transitions;
 - private `0600` outbox creation, atomic rewrites, lock behavior, and corruption failure;
-- recovery markers across scheduled runs;
+- discard-only pre-open markers and recovery markers across scheduled runs;
 - HTTPS portal validation and `X-Portal-Call-Secret` authentication;
 - created and duplicate acknowledgement removal;
 - configured treatment of missing or malformed 2xx per-item results as duplicates;

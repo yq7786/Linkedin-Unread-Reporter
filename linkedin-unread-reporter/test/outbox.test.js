@@ -46,6 +46,16 @@ const capturePending = {
   expectedUnreadCount: 2,
   firstFailureAt: '2026-08-19T03:00:00.000Z',
   attemptCount: 3,
+  recoveryMode: 'direct',
+};
+
+const preopenPending = {
+  ...common,
+  entryId: 'entry-private-preopen',
+  state: 'preopen_pending',
+  expectedUnreadCount: 2,
+  firstFailureAt: '2026-08-19T03:00:00.000Z',
+  attemptCount: 3,
 };
 
 const timestampPending = {
@@ -98,7 +108,10 @@ test('createEmptyOutbox returns a fresh versioned outbox', () => {
 });
 
 test('validateOutbox accepts every complete entry state without copying private data', () => {
-  const value = { version: 1, entries: [capturePending, timestampPending, ready] };
+  const value = {
+    version: 1,
+    entries: [preopenPending, capturePending, timestampPending, ready],
+  };
   assert.equal(validateOutbox(value), value);
 });
 
@@ -110,6 +123,11 @@ test('validateOutbox rejects unsupported versions, states, fields, and missing s
     { version: 1, entries: [{ ...ready, state: 'sent' }] },
     { version: 1, entries: [{ ...ready, extra: 'unknown' }] },
     { version: 1, entries: [{ ...capturePending, firstFailureAt: undefined }] },
+    { version: 1, entries: [{ ...capturePending, recoveryMode: undefined }] },
+    { version: 1, entries: [{ ...capturePending, recoveryMode: 'unread-required' }] },
+    { version: 1, entries: [{ ...capturePending, recoveryMode: 'unsafe-direct' }] },
+    { version: 1, entries: [{ ...preopenPending, firstFailureAt: undefined }] },
+    { version: 1, entries: [{ ...preopenPending, extra: 'unknown' }] },
     { version: 1, entries: [{ ...timestampPending, scanStartedAt: undefined }] },
     { version: 1, entries: [{ ...ready, idempotencyKey: undefined }] },
     { version: 1, entries: [ready, { ...capturePending, entryId: ready.entryId }] },
@@ -128,6 +146,12 @@ test('validateOutbox rejects unsupported versions, states, fields, and missing s
       return true;
     });
   }
+});
+
+test('validateOutbox accepts a legacy capture marker without recoveryMode for safe migration', () => {
+  const { recoveryMode: _recoveryMode, ...legacyCapturePending } = capturePending;
+  const value = { version: 1, entries: [legacyCapturePending] };
+  assert.equal(validateOutbox(value), value);
 });
 
 test('loadOutbox rejects stored non-canonical conversation URLs without exposing them', async () => {

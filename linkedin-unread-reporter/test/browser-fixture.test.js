@@ -305,7 +305,10 @@ browserTest('capture discovers an intermediate recycled row in each stepwise scr
 
   assert.deepEqual(result.outbox.entries.map(({ conversationUrl }) => conversationUrl), urls);
   assert.equal(result.processedConversations, 3);
-  assert.equal(saved.filter(({ entries }) => entries.some(({ state }) => state === 'capture_pending')).length, 3);
+  const captureMarkers = saved.flatMap(({ entries }) => (
+    entries.filter(({ state }) => state === 'capture_pending')
+  ));
+  assert.equal(captureMarkers.filter(({ recoveryMode }) => recoveryMode === 'direct').length, 3);
   assert.equal(rowClicks, 0);
 });
 

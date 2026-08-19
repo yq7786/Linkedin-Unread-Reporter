@@ -234,7 +234,7 @@ function withOutboxLock<T>(options: { lockPath: string; task: () => Promise<T>; 
 
 `loadOutbox` returns `{ version: 1, entries: [] }` only for `ENOENT`. `saveOutbox` validates before writing, creates `<outboxPath>.tmp-<pid>` with `flag: "wx"` and mode `0600`, renames it, chmods the destination to `0600`, and removes the temporary path in `finally`. `withOutboxLock` opens the lock with `flag: "wx"` and mode `0600`, maps `EEXIST` to a sanitized already-running error, awaits `task`, and removes the lock in `finally`.
 
-Validation permits only `capture_pending`, `timestamp_pending`, and `ready`; requires `entryId`, `state`, `leadName`, `conversationUrl`, and state-specific fields; rejects unknown top-level versions and unknown entry fields. Error messages contain no entry data.
+Validation permits `preopen_pending`, `capture_pending`, `timestamp_pending`, and `ready`; requires `entryId`, `state`, `leadName`, `conversationUrl`, and state-specific fields; and rejects unknown top-level versions and unknown entry fields. New `capture_pending` entries require `recoveryMode: direct`; legacy mode-less capture markers remain readable so capture startup can atomically migrate them to direct recovery. Error messages contain no entry data.
 
 Add these gitignore entries:
 
@@ -553,7 +553,9 @@ function captureUnreadMessages(options: {
 }>;
 ```
 
-Process `capture_pending` entries first. For each new row with a validated destination, persist a recovery marker before opening. For a truly anchorless row, accept the clicked result only when the same uniquely visible list identifies that stable row as its sole active row; recover visible blockers by returning to unread and re-resolving the still-unread row. Persist the marker before thread readiness or extraction. If the list correlation is unavailable, fail closed with no marker; a narrow unavoidable click-to-marker crash window remains. On successful extraction atomically replace that marker with one message entry per selected inbound message. Refresh the direct unread URL after every conversation and never retain a Playwright row handle.
+Process `capture_pending` entries first through direct URL recovery. For each new row with a validated destination, persist `preopen_pending` while stabilizing metadata; perform final list-and-exact-candidate revalidation as the last observation; atomically replace it with `capture_pending` and `recoveryMode: direct`; then immediately invoke navigation without another await. A promotion failure before commit leaves `preopen_pending`, does not open, and is discarded at next startup. A failure or abort observed after rename may leave durable direct intent while still preventing the current open, so the next run direct-recovers it at least once. A crash following a successful promotion is handled identically. For a truly anchorless row, accept the clicked result only when the same uniquely visible list identifies that stable row as its sole active row; recover visible blockers by returning to unread and re-resolving the still-unread row. Persist `capture_pending/direct` in `onOpened` before thread readiness or extraction. If the list correlation is unavailable, fail closed with no marker; a narrow unavoidable click-to-marker crash window remains. On successful extraction atomically replace that marker with one message entry per selected inbound message. Refresh the direct unread URL after every conversation and never retain a Playwright row handle.
+
+This deliberately chooses at-least-once durability because LinkedIn navigation and the local outbox cannot be atomic across two systems. The marker reflects the last verified eligibility observation. A narrow external-state race and duplicate capture remain possible, but Portal idempotency keys mitigate duplicates; avoiding message loss takes priority.
 
 Return count-only metadata: `processedConversations`, `capturedMessages`, `pendingRecovery`, `pendingTimestamps`, and `truncated`.
 

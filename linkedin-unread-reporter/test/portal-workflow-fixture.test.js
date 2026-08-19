@@ -353,6 +353,7 @@ test('restart recovers a post-open extraction failure by direct URL and delivers
     const checkpoint = await loadOutbox({ outboxPath: config.outboxPath });
     assert.equal(checkpoint.entries.length, 1);
     assert.equal(checkpoint.entries[0].state, 'capture_pending');
+    assert.equal(checkpoint.entries[0].recoveryMode, 'direct');
     assert.equal(checkpoint.entries[0].conversationUrl, threadTwoUrl);
     assert.equal((await fs.stat(config.outboxPath)).mode & 0o777, 0o600);
     assert.deepEqual(await fs.readdir(directory), ['outbox.json']);
