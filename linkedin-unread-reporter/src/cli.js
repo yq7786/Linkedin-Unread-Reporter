@@ -21,6 +21,7 @@ export async function performBrowserLogin(config, {
     chromium,
     profilePath: config.browserProfilePath,
     onBlocker,
+    authTimeoutMs: config.authTimeoutMs,
     task: async (adapter) => {
       await adapter.gotoUnread(config.unreadUrl);
       return adapter.waitForUnblocked(config.authTimeoutMs);
@@ -28,13 +29,19 @@ export async function performBrowserLogin(config, {
   });
 }
 
-export async function performBrowserScan(config, { onBlocker = () => {} } = {}) {
-  const { chromium } = await import('playwright');
-  return withPersistentBrowser({
+export async function performBrowserScan(config, {
+  onBlocker = () => {},
+  chromiumImpl,
+  withBrowserImpl = withPersistentBrowser,
+  scanImpl = scanUnreadConversations,
+} = {}) {
+  const chromium = chromiumImpl || (await import('playwright')).chromium;
+  return withBrowserImpl({
     chromium,
     profilePath: config.browserProfilePath,
     onBlocker,
-    task: (adapter) => scanUnreadConversations({
+    authTimeoutMs: config.authTimeoutMs,
+    task: (adapter) => scanImpl({
       adapter,
       unreadUrl: config.unreadUrl,
       cap: config.maxUnreadConversations,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runCli } from '../src/cli.js';
+import { performBrowserScan, runCli } from '../src/cli.js';
 import { ConfigError } from '../src/config.js';
 
 const config = {
@@ -94,6 +94,7 @@ test('performBrowserLogin navigates and waits without reading conversation rows'
     withBrowserImpl: async (options) => {
       assert.equal(options.profilePath, config.browserProfilePath);
       assert.equal(options.chromium.marker, 'chromium');
+      assert.equal(options.authTimeoutMs, config.authTimeoutMs);
       return options.task(adapter);
     },
   });
@@ -101,6 +102,28 @@ test('performBrowserLogin navigates and waits without reading conversation rows'
   assert.deepEqual(calls, [
     ['gotoUnread', config.unreadUrl],
     ['waitForUnblocked', config.authTimeoutMs],
+  ]);
+});
+
+test('performBrowserScan passes auth timeout into adapter construction and scanning', async () => {
+  const calls = [];
+  const adapter = { marker: 'adapter' };
+  const result = await performBrowserScan(config, {
+    chromiumImpl: { marker: 'chromium' },
+    withBrowserImpl: async (options) => {
+      calls.push(['browser', options.authTimeoutMs, options.chromium.marker]);
+      return options.task(adapter);
+    },
+    scanImpl: async (options) => {
+      calls.push(['scan', options.authTimeoutMs, options.adapter.marker]);
+      return { conversations: [], truncated: false };
+    },
+  });
+
+  assert.deepEqual(result, { conversations: [], truncated: false });
+  assert.deepEqual(calls, [
+    ['browser', config.authTimeoutMs, 'chromium'],
+    ['scan', config.authTimeoutMs, 'adapter'],
   ]);
 });
 

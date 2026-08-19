@@ -42,6 +42,112 @@ browserTest('Playwright adapter extracts only row metadata from the unread fixtu
   assert.equal(JSON.stringify(rows).includes('message preview'), false);
 });
 
+browserTest('readUnreadCandidates returns eligible humans with URL and count metadata only', async (page) => {
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-candidates.html'), 'utf8');
+  await page.setContent(fixture);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+
+  const candidates = await adapter.readUnreadCandidates({ limit: 50 });
+
+  assert.deepEqual(candidates, [
+    {
+      rowId: 'human-1',
+      leadName: 'Ada',
+      unreadCount: 2,
+      conversationUrl: 'https://www.linkedin.com/messaging/thread/thread-1/',
+    },
+    {
+      rowId: 'human-2',
+      leadName: 'Grace',
+      unreadCount: null,
+      conversationUrl: null,
+    },
+    {
+      rowId: 'human-3',
+      leadName: 'Katherine',
+      unreadCount: 1,
+      conversationUrl: null,
+    },
+  ]);
+  assert.deepEqual(Object.keys(candidates[0]).sort(), [
+    'conversationUrl', 'leadName', 'rowId', 'unreadCount',
+  ]);
+  assert.doesNotMatch(JSON.stringify(candidates), /preview|content|Private|group|Sponsored|Automated/i);
+});
+
+browserTest('openConversation prefers a validated direct URL and uses only the exact unread row as fallback', async (page) => {
+  const unreadUrl = 'https://www.linkedin.com/messaging/?filter=unread';
+  const fixture = await fs.readFile(path.join(fixtures, 'unread-candidates.html'), 'utf8');
+  await page.route('https://www.linkedin.com/messaging/**', async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.startsWith('/messaging/thread/')) {
+      await route.fulfill({
+        contentType: 'text/html',
+        body: '<section class="msg-thread">Thread loaded</section>',
+      });
+      return;
+    }
+    await route.fulfill({ contentType: 'text/html', body: fixture });
+  });
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    recoveryOptions: { pollIntervalMs: 10 },
+  });
+  await adapter.gotoUnread(unreadUrl);
+  const candidates = await adapter.readUnreadCandidates();
+
+  await adapter.openConversation(candidates[0]);
+  assert.equal(page.url(), 'https://www.linkedin.com/messaging/thread/thread-1/');
+
+  await adapter.openConversation({ conversationUrl: candidates[0].conversationUrl });
+  assert.equal(page.url(), 'https://www.linkedin.com/messaging/thread/thread-1/');
+
+  await adapter.gotoUnread(unreadUrl);
+  await adapter.openConversation(candidates[1]);
+  assert.match(page.url(), /\/messaging\/thread\/thread-2\/$/);
+});
+
+browserTest('anchorless opening fails closed unless exactly one visible matching row is still unread', async (page) => {
+  await page.setContent(`
+    <ul data-reporter-conversation-list>
+      <li data-reporter-row-id="human-2"><h3>Read now</h3></li>
+      <li data-reporter-row-id="human-2" class="msg-conversation-listitem--unread" style="display:none">
+        <h3>Hidden stale duplicate</h3><span aria-label="1 unread message"></span>
+      </li>
+    </ul>
+  `);
+  const adapter = new PlaywrightLinkedInAdapter(page);
+
+  await assert.rejects(
+    adapter.openConversation({ rowId: 'human-2', conversationUrl: null }),
+    ScanInvariantError,
+  );
+  assert.equal(page.url(), 'about:blank');
+});
+
+browserTest('direct opening fails closed when navigation lands on a different valid thread', async (page) => {
+  const requestedUrl = 'https://www.linkedin.com/messaging/thread/requested-thread/';
+  const wrongUrl = 'https://www.linkedin.com/messaging/thread/wrong-private-thread/';
+  await page.route(requestedUrl, async (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `
+      <script>history.replaceState({}, '', '/messaging/thread/wrong-private-thread/')</script>
+      <section class="msg-thread">Wrong thread loaded</section>
+    `,
+  }));
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 1_000,
+    recoveryOptions: { pollIntervalMs: 10 },
+  });
+
+  await assert.rejects(
+    adapter.openConversation({ conversationUrl: requestedUrl }),
+    (error) => error instanceof ScanInvariantError
+      && !error.message.includes(requestedUrl)
+      && !error.message.includes(wrongUrl)
+      && !error.message.includes('wrong-private-thread'),
+  );
+});
+
 browserTest('Playwright adapter detects an active nested conversation container', async (page) => {
   await page.setContent(`
     <button aria-pressed="true">Unread</button>

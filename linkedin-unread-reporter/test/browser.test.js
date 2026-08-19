@@ -134,10 +134,14 @@ test('withPersistentBrowser uses a headed persistent context and closes on succe
   const result = await withPersistentBrowser({
     chromium,
     profilePath: '/tmp/safe-profile',
-    task: async (adapter) => adapter.page.marker,
+    authTimeoutMs: 12_345,
+    task: async (adapter) => ({
+      marker: adapter.page.marker,
+      authTimeoutMs: adapter.authTimeoutMs,
+    }),
   });
 
-  assert.equal(result, 'page');
+  assert.deepEqual(result, { marker: 'page', authTimeoutMs: 12_345 });
   assert.equal(calls[0][0], '/tmp/safe-profile');
   assert.equal(calls[0][1].headless, false);
   assert.equal(calls.at(-1), 'close');
@@ -204,4 +208,108 @@ test('Playwright adapter re-enters unread after a blocker clears onto the feed',
     sleep: async (milliseconds) => { clock += milliseconds; },
   }), { recovered: true });
   assert.deepEqual(gotoCalls, [unreadUrl, unreadUrl]);
+});
+
+test('readUnreadCandidates rejects invalid limits before touching the DOM', async () => {
+  let locatorCalls = 0;
+  const adapter = new PlaywrightLinkedInAdapter({
+    locator: () => {
+      locatorCalls += 1;
+      throw new Error('DOM must not be touched');
+    },
+  });
+
+  for (const limit of [0, 51, 1.5, '2']) {
+    await assert.rejects(
+      adapter.readUnreadCandidates({ limit }),
+      (error) => error.code === 'candidate-limit-invalid',
+    );
+  }
+  assert.equal(locatorCalls, 0);
+});
+
+test('openConversation recovers a URL-only thread from login and re-enters its validated URL', async () => {
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/recovery-thread/';
+  const gotoCalls = [];
+  const notices = [];
+  let evaluations = 0;
+  let clock = 0;
+  const page = {
+    goto: async (url) => { gotoCalls.push(url); },
+    url: () => gotoCalls.length > 1 ? threadUrl : 'https://www.linkedin.com/login',
+    evaluate: async () => {
+      evaluations += 1;
+      if (evaluations === 1) {
+        return { url: 'https://www.linkedin.com/login', threadCount: 0 };
+      }
+      if (gotoCalls.length === 1) {
+        return { url: 'https://www.linkedin.com/feed/', threadCount: 0 };
+      }
+      return { url: threadUrl, threadCount: 1 };
+    },
+  };
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 1_000,
+    recoveryOptions: {
+      pollIntervalMs: 10,
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+    },
+    onBlocker: ({ type }) => notices.push(type),
+  });
+
+  assert.equal(await adapter.openConversation({ conversationUrl: threadUrl }), threadUrl);
+  assert.deepEqual(notices, ['login']);
+  assert.deepEqual(gotoCalls, [threadUrl, threadUrl]);
+});
+
+test('openConversation re-enters the requested thread even if manual recovery lands on another thread', async () => {
+  const requestedUrl = 'https://www.linkedin.com/messaging/thread/requested-thread/';
+  const otherUrl = 'https://www.linkedin.com/messaging/thread/other-private-thread/';
+  const gotoCalls = [];
+  let reads = 0;
+  let clock = 0;
+  const page = {
+    goto: async (url) => { gotoCalls.push(url); },
+    url: () => gotoCalls.length > 1 ? requestedUrl : otherUrl,
+    evaluate: async () => {
+      reads += 1;
+      if (reads === 1) return { url: 'https://www.linkedin.com/login', threadCount: 0 };
+      if (gotoCalls.length === 1) return { url: otherUrl, threadCount: 1 };
+      return { url: requestedUrl, threadCount: 1 };
+    },
+  };
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 1_000,
+    recoveryOptions: {
+      pollIntervalMs: 10,
+      now: () => clock,
+      sleep: async (milliseconds) => { clock += milliseconds; },
+    },
+  });
+
+  assert.equal(await adapter.openConversation({ conversationUrl: requestedUrl }), requestedUrl);
+  assert.deepEqual(gotoCalls, [requestedUrl, requestedUrl]);
+});
+
+test('openConversation sanitizes browser failures that contain private URLs and row identities', async () => {
+  const privateUrl = 'https://www.linkedin.com/messaging/thread/private-thread-id/';
+  const directAdapter = new PlaywrightLinkedInAdapter({
+    goto: async () => { throw new Error(`navigation failed for ${privateUrl}`); },
+  });
+  await assert.rejects(
+    directAdapter.openConversation({ conversationUrl: privateUrl }),
+    (error) => error.name === 'ScanInvariantError'
+      && !error.message.includes(privateUrl)
+      && !error.message.includes('private-thread-id'),
+  );
+
+  const privateRowId = 'private-row-id';
+  const fallbackAdapter = new PlaywrightLinkedInAdapter({
+    locator: () => { throw new Error(`locator failed for ${privateRowId}`); },
+  });
+  await assert.rejects(
+    fallbackAdapter.openConversation({ rowId: privateRowId, conversationUrl: null }),
+    (error) => error.name === 'ScanInvariantError' && !error.message.includes(privateRowId),
+  );
 });

@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+  <body>
+    <main>
+      <button aria-pressed="true">Unread</button>
+      <ul class="msg-conversations-container__conversations-list">
+        <li id="human-1" class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Ada</h3>
+          <a href="/messaging/thread/thread-1/?trk=private-tracking#latest">Open conversation</a>
+          <span aria-label="2 unread messages"></span>
+          <p>Private Ada message preview</p>
+        </li>
+        <li id="human-2" class="msg-conversation-listitem msg-conversation-listitem--unread"
+            onclick="history.pushState({}, '', '/messaging/thread/thread-2/'); document.querySelector('.msg-thread').hidden = false">
+          <h3 class="msg-conversation-listitem__participant-names">Grace</h3>
+          <span aria-label="Unread message"></span>
+          <p>Private Grace message content</p>
+        </li>
+        <li id="human-3" class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Katherine</h3>
+          <span aria-label="1 unread message"></span>
+          <div class="msg-conversation-card__message-snippet">Sponsored</div>
+          <span style="display:none">Sponsored</span>
+        </li>
+        <li id="group-1" class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Engineering group</h3>
+          <span aria-label="1 unread message"></span>
+          <span>Group</span>
+        </li>
+        <li id="group-2" class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Planning group</h3>
+          <span aria-label="1 unread message"></span>
+          <div>Group chat</div>
+        </li>
+        <li id="group-3" aria-label="Group conversation"
+            class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Delivery group</h3>
+          <span aria-label="1 unread message"></span>
+        </li>
+        <li id="sponsored-1" class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Sponsored sender</h3>
+          <span aria-label="1 unread message"></span>
+          <span>Sponsored</span>
+        </li>
+        <li id="automated-1" class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Automated sender</h3>
+          <span aria-label="1 unread message"></span>
+          <div>Automated conversation</div>
+        </li>
+        <li id="automated-2" class="msg-conversation-listitem msg-conversation-listitem--unread">
+          <h3 class="msg-conversation-listitem__participant-names">Automation sender</h3>
+          <span aria-label="1 unread message"></span>
+          <span>Automated</span>
+        </li>
+      </ul>
+      <section class="msg-thread" hidden>Thread loaded</section>
+    </main>
+  </body>
+</html>
