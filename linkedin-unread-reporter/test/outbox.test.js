@@ -397,9 +397,8 @@ test('withOutboxLock aborts and awaits a cooperative task before releasing a com
   assert.deepEqual(events, ['chmod', 'task-start', 'task-resumed', 'release']);
 });
 
-test('the package lock artifact is ignored without a custom reclaim guard', async () => {
+test('all package lock artifacts are ignored without a custom reclaim guard', async () => {
   const gitignore = await fs.readFile(new URL('../.gitignore', import.meta.url), 'utf8');
   const patterns = gitignore.split(/\r?\n/);
-  assert.equal(patterns.includes('.linkedin-unread-outbox.lock'), true);
-  assert.equal(patterns.includes('.linkedin-unread-outbox.lock.reclaim'), false);
+  assert.equal(patterns.includes('.linkedin-unread-outbox.lock*'), true);
 });
