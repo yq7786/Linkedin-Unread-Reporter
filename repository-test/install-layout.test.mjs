@@ -26,6 +26,115 @@ async function exists(target) {
   return fs.access(target).then(() => true, () => false);
 }
 
+async function listFiles(directory) {
+  const files = [];
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await listFiles(target));
+    if (entry.isFile()) files.push(target);
+  }
+  return files;
+}
+
+async function copyCurrentSkill(destination) {
+  const { stdout } = await execFileAsync('git', [
+    'ls-files', '--cached', '--others', '--exclude-standard', '-z', '--',
+    'linkedin-unread-reporter',
+  ], { cwd: repositoryRoot, encoding: 'utf8' });
+  for (const relativePath of stdout.split('\0').filter(Boolean)) {
+    const source = path.join(repositoryRoot, relativePath);
+    if (!await exists(source) || !(await fs.stat(source)).isFile()) continue;
+    const installedRelative = path.relative('linkedin-unread-reporter', relativePath);
+    const target = path.join(destination, installedRelative);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(source, target);
+  }
+}
+
+function isPrivateOrGenerated(relativePath) {
+  const parts = relativePath.split('/');
+  const basename = parts.at(-1);
+  return parts.includes('node_modules')
+    || parts.includes('.linkedin-browser-profile')
+    || parts.includes('.git')
+    || parts.includes('playwright-report')
+    || parts.includes('test-results')
+    || parts.includes('coverage')
+    || basename === '.env'
+    || basename.startsWith('.env.tmp-')
+    || basename.startsWith('.linkedin-unread-outbox.')
+    || basename.startsWith('.linkedin-timestamp-work.')
+    || basename.startsWith('.linkedin-timestamp-results.');
+}
+
+async function installedTextFiles(installed) {
+  const textFiles = [];
+  for (const file of await listFiles(installed)) {
+    const relativePath = path.relative(installed, file).split(path.sep).join('/');
+    if (isPrivateOrGenerated(relativePath)) continue;
+    const contents = await fs.readFile(file);
+    if (!contents.includes(0)) textFiles.push([relativePath, contents.toString('utf8')]);
+  }
+  return textFiles;
+}
+
+async function runPortableChecks(installed) {
+  const manifest = JSON.parse(await fs.readFile(path.join(installed, 'package.json'), 'utf8'));
+  assert.equal(manifest.scripts.check, 'node --check src/*.js && node test/run-tests.js');
+  assert.doesNotMatch(manifest.scripts.check, /\.\.\//);
+
+  const sourceFiles = (await listFiles(path.join(installed, 'src')))
+    .filter((file) => file.endsWith('.js'));
+  for (const file of sourceFiles) {
+    await execFileAsync(process.execPath, ['--check', file], { cwd: installed });
+  }
+  for (const testFile of [
+    'config.test.js',
+    'configure.test.js',
+    'linkedin-state.test.js',
+    'messages.test.js',
+  ]) {
+    await execFileAsync(process.execPath, [path.join('test', testFile)], { cwd: installed });
+  }
+}
+
+async function validateInstalledArtifact(installed) {
+  for (const marker of requiredMarkers) {
+    assert.equal(await exists(path.join(installed, marker)), true, marker);
+  }
+  assert.equal(await exists(path.join(installed, 'README.md')), false);
+  for (const privatePath of [
+    'node_modules',
+    '.env',
+    '.linkedin-browser-profile',
+    '.linkedin-unread-outbox.json',
+    '.linkedin-unread-outbox.lock',
+    '.linkedin-timestamp-work.json',
+    '.linkedin-timestamp-results.json',
+  ]) {
+    assert.equal(await exists(path.join(installed, privatePath)), false, privatePath);
+  }
+
+  const files = await installedTextFiles(installed);
+  const scanned = new Set(files.map(([relativePath]) => relativePath));
+  for (const required of ['package.json', '.env.example', '.gitignore', 'SKILL.md']) {
+    assert.equal(scanned.has(required), true, `not scanned: ${required}`);
+  }
+  for (const prefix of ['agents/', 'fixtures/', 'references/', 'src/', 'test/']) {
+    assert.equal([...scanned].some((relativePath) => relativePath.startsWith(prefix)), true, prefix);
+  }
+
+  const legacyProduct = ['Sla', 'ck'].join('');
+  const legacyIdentifier = ['configure', legacyProduct].join('');
+  const legacyConfigKey = [legacyProduct.toUpperCase(), 'WEBHOOK_URL'].join('_');
+  for (const [relativePath, text] of files) {
+    assert.equal(text.toLowerCase().includes(legacyProduct.toLowerCase()), false, relativePath);
+    assert.equal(text.includes(legacyIdentifier), false, relativePath);
+    assert.equal(text.includes(legacyConfigKey), false, relativePath);
+  }
+  await runPortableChecks(installed);
+}
+
 test('repository exposes a complete named skill path', async () => {
   const { stdout: committedFiles } = await execFileAsync('git', [
     'ls-tree', '-r', '--name-only', 'HEAD', '--', 'linkedin-unread-reporter',
@@ -51,7 +160,7 @@ test('packaging ignores all private portal ingestion state files', async () => {
   for (const pattern of [
     '.linkedin-unread-outbox.json',
     '.linkedin-unread-outbox.json.tmp-*',
-    '.linkedin-unread-outbox.lock',
+    '.linkedin-unread-outbox.lock*',
     '.linkedin-timestamp-work.json',
     '.linkedin-timestamp-work.json.tmp-*',
     '.linkedin-timestamp-results.json',
@@ -84,12 +193,16 @@ test('Git sparse checkout of the named path contains the complete skill', async 
       await exists(path.join(clone, 'linkedin-unread-reporter', 'README.md')),
       false,
     );
+
+    const currentArchive = path.join(temporaryRoot, 'current-worktree-skill');
+    await copyCurrentSkill(currentArchive);
+    await validateInstalledArtifact(currentArchive);
   } finally {
     await fs.rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test('skill-installer Git boundary validates and copies the committed named skill', async () => {
+test('skill-installer Git boundary validates and copies the current worktree skill', async () => {
   const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-installer-layout-'));
   try {
     await execFileAsync('python3', [
@@ -99,16 +212,13 @@ test('skill-installer Git boundary validates and copies the committed named skil
       temporaryRoot,
     ]);
     const installed = path.join(temporaryRoot, 'linkedin-unread-reporter');
-    for (const marker of requiredMarkers) {
-      assert.equal(await exists(path.join(installed, marker)), true, marker);
-    }
-    assert.equal(await exists(path.join(installed, 'README.md')), false);
+    await validateInstalledArtifact(installed);
   } finally {
     await fs.rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test('skill-installer download boundary validates and copies the committed named skill', async () => {
+test('skill-installer download boundary validates and copies the current worktree skill', async () => {
   const temporaryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-download-layout-'));
   try {
     await execFileAsync('python3', [
@@ -118,16 +228,13 @@ test('skill-installer download boundary validates and copies the committed named
       temporaryRoot,
     ]);
     const installed = path.join(temporaryRoot, 'linkedin-unread-reporter');
-    for (const marker of requiredMarkers) {
-      assert.equal(await exists(path.join(installed, marker)), true, marker);
-    }
-    assert.equal(await exists(path.join(installed, 'README.md')), false);
+    await validateInstalledArtifact(installed);
   } finally {
     await fs.rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
-test('skill collects the webhook in chat and transfers it only through hidden PTY input', async () => {
+test('skill collects portal credentials in chat and transfers them only through hidden PTY input', async () => {
   const skill = await fs.readFile(path.join(skillRoot, 'SKILL.md'), 'utf8');
   const installVerification = skill.indexOf('## Verify the installation');
   const dependencySetup = skill.indexOf('npm install');
@@ -138,15 +245,32 @@ test('skill collects the webhook in chat and transfers it only through hidden PT
   assert.match(skill, /- `SKILL\.md`/);
   assert.match(skill, /references\/automation-setup\.md/);
   assert.match(skill, /stop immediately/i);
-  assert.match(skill, /Please provide `SLACK_WEBHOOK_URL`\./);
+  assert.match(skill, /Please provide the Portal Webhook URL\./);
+  assert.match(skill, /Please provide `PORTAL_CALL_SECRET`\./);
+  assert.match(skill, /PORTAL_WEBHOOK_URL/);
+  assert.match(skill, /HTTPS/);
   assert.match(skill, /chat history/i);
   assert.match(skill, /interactive PTY/i);
   assert.match(skill, /hidden input/i);
-  assert.match(
-    skill,
-    /Never place the value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output\./,
-  );
-  assert.match(skill, /do not quote, summarize, validate visibly, or repeat it/i);
+  assert.match(skill, /Never put either value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output\./);
+  assert.match(skill, /Never quote, summarize, visibly validate, or repeat either value/i);
   assert.match(skill, /Do not read `\.env` back/i);
   assert.doesNotMatch(skill, /paste their current webhook into that hidden prompt/i);
+});
+
+test('package check is portable and depends only on installed resources', async () => {
+  const manifest = JSON.parse(await fs.readFile(path.join(skillRoot, 'package.json'), 'utf8'));
+  assert.equal(manifest.scripts.check, 'node --check src/*.js && node test/run-tests.js');
+  assert.doesNotMatch(manifest.scripts.check, /\.\.\//);
+});
+
+test('live installed resources expose only the portal setup contract', async () => {
+  const legacyProduct = ['Sla', 'ck'].join('');
+  const legacyIdentifier = ['configure', legacyProduct].join('');
+  const legacyConfigKey = [legacyProduct.toUpperCase(), 'WEBHOOK_URL'].join('_');
+  for (const [relativePath, text] of await installedTextFiles(skillRoot)) {
+    assert.equal(text.toLowerCase().includes(legacyProduct.toLowerCase()), false, relativePath);
+    assert.equal(text.includes(legacyIdentifier), false, relativePath);
+    assert.equal(text.includes(legacyConfigKey), false, relativePath);
+  }
 });

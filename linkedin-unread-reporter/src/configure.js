@@ -27,7 +27,7 @@ export function updateEnvText(existingText, values) {
 }
 
 export async function readHiddenSecret({
-  prompt = 'Slack incoming webhook: ',
+  prompt = 'Secret: ',
   stdin = process.stdin,
   stdout = process.stdout,
 } = {}) {
@@ -92,29 +92,6 @@ async function writePrivateEnv({ envPath, values, fileSystem, processId }) {
   } finally {
     await fileSystem.rm(temporaryPath, { force: true });
   }
-}
-
-export async function configureSlack({
-  envPath = path.join(PROJECT_ROOT, '.env'),
-  askSecret = (prompt) => readHiddenSecret({ prompt }),
-  fileSystem = fs,
-  processId = process.pid,
-} = {}) {
-  const webhook = await askSecret('Slack incoming webhook (input hidden): ');
-  loadConfig({
-    env: { SLACK_WEBHOOK_URL: webhook },
-    projectRoot: path.dirname(envPath),
-    requireWebhook: true,
-  });
-
-  await writePrivateEnv({
-    envPath,
-    values: { SLACK_WEBHOOK_URL: webhook },
-    fileSystem,
-    processId,
-  });
-
-  return { configured: true, envPath };
 }
 
 export async function configurePortal({

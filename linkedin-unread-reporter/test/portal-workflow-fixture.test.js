@@ -46,7 +46,7 @@ const anchorlessUnreadFixture = `<!doctype html>
   <button aria-pressed="true">Unread</button>
   <ul data-reporter-conversation-list>
     <li data-reporter-row-id="human-restart" class="msg-conversation-listitem--unread"
-        onclick="history.pushState({}, '', '/messaging/thread/thread-2/'); document.querySelector('.msg-thread').hidden = false">
+        onclick="this.classList.add('msg-conversation-listitem--active'); this.setAttribute('aria-selected', 'true'); history.pushState({}, '', '/messaging/thread/thread-2/'); document.querySelector('.msg-thread').hidden = false">
       <h3 data-reporter-name>Grace</h3>
       <span aria-label="1 unread message"></span>
       <p data-preview>Private restart preview</p>

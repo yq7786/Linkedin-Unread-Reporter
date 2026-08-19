@@ -6,12 +6,71 @@ from __future__ import annotations
 import importlib.util
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 
 
 SKILL_NAME = "linkedin-unread-reporter"
+
+
+def build_current_worktree_repository(repository_root: Path, destination: Path) -> Path:
+    source_repository = destination / "repository"
+    source_repository.mkdir()
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository_root),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            SKILL_NAME,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    for encoded_path in result.stdout.split(b"\0"):
+        if not encoded_path:
+            continue
+        relative_path = Path(encoded_path.decode("utf-8"))
+        source = repository_root / relative_path
+        if not source.is_file():
+            continue
+        destination_file = source_repository / relative_path
+        destination_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination_file)
+
+    subprocess.run(
+        ["git", "init", "--initial-branch=main", str(source_repository)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source_repository), "add", "--", SKILL_NAME],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(source_repository),
+            "-c",
+            "user.name=Installer Boundary",
+            "-c",
+            "user.email=installer-boundary@example.invalid",
+            "commit",
+            "-m",
+            "test fixture",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return source_repository
 
 
 def load_installer():
@@ -47,20 +106,25 @@ def main() -> int:
     installer = load_installer()
 
     with tempfile.TemporaryDirectory(prefix="linkedin-installer-source-") as temporary:
+        temporary_root = Path(temporary)
+        source_repository = build_current_worktree_repository(
+            repository_root,
+            temporary_root,
+        )
         if method == "git":
             checked_out = installer._git_sparse_checkout(
-                repository_root.as_uri(),
+                source_repository.as_uri(),
                 "main",
                 [SKILL_NAME],
-                temporary,
+                str(temporary_root / "checkout"),
             )
         else:
-            archive = Path(temporary) / "fixture.zip"
+            archive = temporary_root / "fixture.zip"
             subprocess.run(
                 [
                     "git",
                     "-C",
-                    str(repository_root),
+                    str(source_repository),
                     "archive",
                     "--format=zip",
                     "--prefix=repo-main/",
@@ -71,7 +135,7 @@ def main() -> int:
             )
             payload = archive.read_bytes()
             installer._request = lambda _url: payload
-            download_root = Path(temporary) / "download"
+            download_root = temporary_root / "download"
             download_root.mkdir()
             checked_out = installer._download_repo_zip(
                 "local",

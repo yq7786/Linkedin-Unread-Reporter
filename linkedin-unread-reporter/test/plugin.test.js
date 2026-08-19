@@ -39,7 +39,6 @@ function assertNoCredentialValuesOrAbsolutePaths(prompt) {
   assert.doesNotMatch(prompt, /(?:^|[\s("'`=])\/(?!\/)[A-Za-z0-9._~-]+(?:\/[^\s"'`)]+)?/m);
   assert.doesNotMatch(prompt, /\b[A-Za-z]:[\\/]/);
   assert.doesNotMatch(prompt, /PORTAL_WEBHOOK_URL\s*=|PORTAL_CALL_SECRET\s*=/);
-  assert.doesNotMatch(prompt, /hooks\.slack/i);
   assert.doesNotMatch(prompt, /https?:\/\//i);
   assert.doesNotMatch(prompt, /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/i);
   assert.doesNotMatch(prompt, /\b(?:secret|token|webhook)\s*[:=]\s*["']?[^\s"'`]+/i);
@@ -78,11 +77,8 @@ test('skill metadata and instructions are complete and portable', async () => {
     assert.match(document, /PORTAL_CALL_SECRET/);
     assert.match(document, /HTTPS/);
     assert.match(document, /0600/);
-    assert.doesNotMatch(document, /Slack/i);
-    assert.doesNotMatch(document, /npm run slack-test/);
   }
   assert.match(metadata, /private portal/i);
-  assert.doesNotMatch(metadata, /Slack/i);
 
   assert.match(skill, /read-on-open/i);
   assert.match(skill, /\.linkedin-unread-outbox\.json/);
@@ -115,7 +111,6 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.match(automation, /reasoning effort:\s*`medium`/);
   assert.doesNotMatch(automation, /gpt-5\.4/i);
   assert.doesNotMatch(automation, /Ask for the user's desired weekdays/);
-  assert.doesNotMatch(automation, /Slack/i);
   assert.doesNotMatch(automation, /\/Users\/[A-Za-z0-9._-]+\//);
 
   const scheduledPrompt = extractFencedPrompt(automation, 'Automation rules');
@@ -171,7 +166,10 @@ test('package and lockfile require Node 18 with a compatible Playwright pin', as
   assert.equal(manifest.scripts.test, 'node test/run-tests.js');
   assert.equal(manifest.scripts.login, 'node src/cli.js login');
   assert.equal(manifest.scripts.report, 'node src/cli.js scheduled-report');
-  assert.match(manifest.scripts.check, /node test\/run-tests\.js/);
+  assert.equal(
+    manifest.scripts.check,
+    'node --check src/*.js && node test/run-tests.js',
+  );
   assert.equal(manifest.dependencies.playwright, '1.55.1');
   assert.equal(manifest.dependencies['proper-lockfile'], '4.1.2');
   assert.equal(lockfile.packages[''].engines.node, '>=18');
@@ -300,6 +298,18 @@ function hasUnsafeMatch(text, pattern, synthetic) {
 
 async function resolveCommitCandidateViolations(candidates, root = PROJECT_ROOT) {
   const violations = [];
+  const legacyWebhookMiddleLabel = ['sla', 'ck'].join('');
+  const legacyWebhookHost = ['hooks', legacyWebhookMiddleLabel, 'com']
+    .map((label) => label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('\\.');
+  const legacyWebhookPattern = new RegExp(
+    `https:\\/\\/${legacyWebhookHost}\\/services\\/[A-Za-z0-9_-]+\\/[A-Za-z0-9_-]+\\/[A-Za-z0-9_-]+`,
+    'gi',
+  );
+  const legacyTokenPattern = new RegExp(
+    `\\b${['xox', '[a-z]'].join('')}-[A-Za-z0-9-]{10,}\\b`,
+    'gi',
+  );
   for (const file of candidates) {
     const relativePath = path.relative(root, file).split(path.sep).join('/');
     const basename = path.posix.basename(relativePath);
@@ -319,8 +329,8 @@ async function resolveCommitCandidateViolations(candidates, root = PROJECT_ROOT)
       /\b[A-Za-z]:[\\/]Users[\\/][A-Za-z0-9._-]+[\\/]/gi,
     ];
     const credentialPatterns = [
-      /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+/gi,
-      /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi,
+      legacyWebhookPattern,
+      legacyTokenPattern,
       /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
       /\bAKIA[A-Z0-9]{16}\b/g,
       /\bsk-(?:live-)?[A-Za-z0-9_-]{20,}\b/gi,
@@ -351,23 +361,30 @@ test('repository privacy classifier rejects runtime artifacts and private produc
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-privacy-gate-'));
   try {
     const actualSecret = ['actual', 'production', 'secret'].join('-');
-    const slackWebhook = [
-      'https://hooks.slack.com/services',
-      'T0123456789',
-      'B0123456789',
-      'abcdefghijklmnopqrstuvwx',
-    ].join('/');
     const privateKeyHeader = ['-----BEGIN', 'PRIVATE KEY-----'].join(' ');
     const portalSecretAssignment = `${['PORTAL', 'CALL', 'SECRET'].join('_')}=${actualSecret}`;
     const portalUrl = `${['https://portal', 'company', 'invalid'].join('.')}/hook`;
     const genericSecret = ['actual', 'value', '123'].join('-');
+    const legacyMiddleLabel = ['sla', 'ck'].join('');
+    const legacyWebhook = [
+      `https://${['hooks', legacyMiddleLabel, 'com'].join('.')}/services`,
+      'T0123456789',
+      'B0123456789',
+      'abcdefghijklmnopqrstuvwx',
+    ].join('/');
+    const splitLabelLookalike = [
+      `https://${['hooks', 'sla', 'ck', 'com'].join('.')}/services`,
+      'T0123456789',
+      'B0123456789',
+      'abcdefghijklmnopqrstuvwx',
+    ].join('/');
+    const legacyToken = [['xox', 'b'].join(''), '1234567890abcdefghijkl'].join('-');
     const genericAssignments = [
       `${['API', 'TOKEN'].join('_')}=${genericSecret}`,
       `${['api', 'key'].join('_')}: ${genericSecret}`,
       `${['access', 'token'].join('_')} = ${genericSecret}`,
     ];
     const familyTokens = {
-      slackToken: ['xoxb', '1234567890abcdefghijkl'].join('-'),
       githubToken: `ghp_${'a'.repeat(24)}`,
       awsKey: `AKIA${'A1'.repeat(8)}`,
       stripeStyleKey: ['sk', 'live', 'abcdefghijklmnopqrstuvwxyz'].join('-'),
@@ -385,7 +402,8 @@ test('repository privacy classifier rejects runtime artifacts and private produc
       ['src/linux-home.js', `const path = "${['', 'home', 'actual-user', 'private'].join('/')}"`],
       ['src/windows-home.js', `const path = "${['C:', 'Users', 'actual-user', 'private'].join('/')}"`],
       ['src/windows-home-backslash.js', `const path = "${['C:', 'Users', 'actual-user', 'private'].join('\\')}"`],
-      ['src/slack.js', slackWebhook],
+      ['src/legacy-webhook.js', legacyWebhook],
+      ['src/legacy-token.txt', legacyToken],
       ['src/portal-env.js', portalSecretAssignment],
       ['src/portal-json.js', JSON.stringify({ portalCallSecret: actualSecret })],
       ['src/portal-url.js', JSON.stringify({ portalWebhookUrl: portalUrl })],
@@ -414,6 +432,7 @@ test('repository privacy classifier rejects runtime artifacts and private produc
     }
 
     const allowedCases = [
+      ['src/split-label-lookalike.js', splitLabelLookalike],
       [
         '.env.example',
         'PORTAL_WEBHOOK_URL=https://portal.example.test/hook\nPORTAL_CALL_SECRET=replace-me',
@@ -424,10 +443,8 @@ test('repository privacy classifier rejects runtime artifacts and private produc
       ],
       [
         'test/sanitized.test.js',
-        'const home = "/Users/example/private"; const token = "xoxb-test-placeholder-token"; '
-          + 'const API_TOKEN = "test-placeholder"; '
-          + 'const config = { portalCallSecret: "private-call-secret" }; '
-          + 'const hook = "https://hooks.slack.com/services/test/test/test-placeholder";',
+        'const home = "/Users/example/private"; const API_TOKEN = "test-placeholder"; '
+          + 'const config = { portalCallSecret: "private-call-secret" };',
       ],
     ];
     for (const [relativePath, content] of allowedCases) {

@@ -151,17 +151,6 @@ test('timestamp work notifications expose counts and attempts only', async () =>
   assert.match(stdout.join('\n'), /Timestamp normalization required: 4 item\(s\), attempt 2 of 3\./);
 });
 
-test('slack-test returns usage without reading configuration or causing side effects', async () => {
-  let reads = 0;
-  const { dependencies, stderr, calls } = harness({
-    readEnvImpl: () => { reads += 1; return {}; },
-  });
-  assert.equal(await runCli(['slack-test'], dependencies), 1);
-  assert.match(stderr.join('\n'), /<configure\|login\|scan\|deliver\|scheduled-report>/);
-  assert.equal(reads, 0);
-  assert.deepEqual(calls, { configure: 0, login: 0, capture: 0, workflow: [] });
-});
-
 test('unexpected errors never expose arbitrary multi-word, JSON-shaped, or unlabeled content', async () => {
   const privateFragments = [
     'Ada Private Person',

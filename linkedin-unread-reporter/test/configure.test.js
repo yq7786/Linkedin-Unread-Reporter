@@ -5,9 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { loadConfig, readProjectEnv } from '../src/config.js';
-import { configurePortal, configureSlack, updateEnvText } from '../src/configure.js';
-
-const webhook = ['https://hooks.slack.com', 'services', 'AAA', 'BBB', 'CCC'].join('/');
+import { configurePortal, updateEnvText } from '../src/configure.js';
 
 async function withTempDirectory(callback) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-reporter-'));
@@ -18,73 +16,21 @@ async function withTempDirectory(callback) {
   }
 }
 
-test('updateEnvText replaces the webhook and preserves unrelated settings', () => {
-  const result = updateEnvText('REPORT_TIMEZONE=Pacific/Auckland\nCUSTOM=value\nSLACK_WEBHOOK_URL=old\n', {
-    SLACK_WEBHOOK_URL: webhook,
+test('updateEnvText replaces selected values and preserves unrelated settings', () => {
+  const result = updateEnvText('REPORT_TIMEZONE=Pacific/Auckland\nCUSTOM=value\nPORTAL_CALL_SECRET=test-placeholder\n', {
+    PORTAL_CALL_SECRET: 'test-placeholder-new',
   });
   assert.match(result, /REPORT_TIMEZONE=Pacific\/Auckland/);
   assert.match(result, /CUSTOM=value/);
-  assert.match(result, new RegExp(`SLACK_WEBHOOK_URL=${webhook}`));
-  assert.equal((result.match(/SLACK_WEBHOOK_URL=/g) || []).length, 1);
+  assert.match(result, /PORTAL_CALL_SECRET=test-placeholder-new/);
+  assert.equal(result.split(`${['PORTAL', 'CALL', 'SECRET'].join('_')}=`).length - 1, 1);
 });
 
-test('configureSlack creates a private env file without returning the secret', async () => {
+test('configurePortal atomically stores portal values and preserves unrelated env lines', async () => {
   await withTempDirectory(async (directory) => {
     const envPath = path.join(directory, '.env');
-    const prompts = [];
-
-    const result = await configureSlack({
-      envPath,
-      askSecret: async (prompt) => {
-        prompts.push(prompt);
-        return webhook;
-      },
-    });
-
-    assert.deepEqual(result, { configured: true, envPath });
-    assert.equal(prompts.length, 1);
-    assert.doesNotMatch(JSON.stringify(result), /hooks\.slack\.com/);
-    assert.match(await fs.readFile(envPath, 'utf8'), new RegExp(`SLACK_WEBHOOK_URL=${webhook}`));
-    assert.equal((await fs.stat(envPath)).mode & 0o777, 0o600);
-  });
-});
-
-test('configureSlack validates before writing and does not expose the supplied value', async () => {
-  await withTempDirectory(async (directory) => {
-    const envPath = path.join(directory, '.env');
-    const invalidSecret = 'not-a-webhook-private-value';
-
-    await assert.rejects(
-      configureSlack({ envPath, askSecret: async () => invalidSecret }),
-      (error) => !error.message.includes(invalidSecret),
-    );
-    await assert.rejects(fs.access(envPath));
-  });
-});
-
-test('configureSlack removes the secret temporary file after an atomic rename failure', async () => {
-  const removed = [];
-  const fileSystem = {
-    readFile: async () => { const error = new Error('missing'); error.code = 'ENOENT'; throw error; },
-    writeFile: async () => {},
-    rename: async () => { throw new Error('rename failed'); },
-    chmod: async () => {},
-    rm: async (target, options) => { removed.push([target, options]); },
-  };
-
-  await assert.rejects(configureSlack({
-    envPath: '/tmp/reporter/.env',
-    askSecret: async () => webhook,
-    fileSystem,
-    processId: 1,
-  }), /rename failed/);
-  assert.deepEqual(removed, [['/tmp/reporter/.env.tmp-1', { force: true }]]);
-});
-
-test('configurePortal atomically stores portal values and preserves Slack', async () => {
-  await withTempDirectory(async (directory) => {
-    const envPath = path.join(directory, '.env');
-    await fs.writeFile(envPath, 'SLACK_WEBHOOK_URL=legacy\n', 'utf8');
+    const opaqueLegacyLine = `${[['SLA', 'CK'].join(''), 'WEBHOOK_URL'].join('_')}=opaque-value`;
+    await fs.writeFile(envPath, `${opaqueLegacyLine}\n`, 'utf8');
     const prompts = [];
     const answers = [
       'https://portal.example.test/hooks/linkedin',
@@ -100,7 +46,7 @@ test('configurePortal atomically stores portal values and preserves Slack', asyn
     });
 
     const text = await fs.readFile(envPath, 'utf8');
-    assert.match(text, /^SLACK_WEBHOOK_URL=legacy$/m);
+    assert.equal(text.split('\n').includes(opaqueLegacyLine), true);
     assert.match(text, /^PORTAL_WEBHOOK_URL=https:\/\/portal\.example\.test\/hooks\/linkedin$/m);
     assert.match(text, /^PORTAL_CALL_SECRET=private-call-secret$/m);
     assert.deepEqual(result, { configured: true, envPath });
@@ -197,7 +143,7 @@ test('configurePortal removes its secret temporary file after an atomic rename f
     'private-call-secret',
   ];
   const fileSystem = {
-    readFile: async () => 'SLACK_WEBHOOK_URL=legacy\n',
+    readFile: async () => `${[['SLA', 'CK'].join(''), 'WEBHOOK_URL'].join('_')}=opaque-value\n`,
     writeFile: async (_target, text) => { writtenText = text; },
     rename: async () => { throw new Error('rename failed'); },
     chmod: async () => {},

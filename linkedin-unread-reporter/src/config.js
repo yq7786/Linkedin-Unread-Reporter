@@ -90,23 +90,6 @@ export function validatePortalCallSecret(value) {
   return value;
 }
 
-function validateSlackWebhook(value) {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'https:'
-      || url.hostname !== 'hooks.slack.com'
-      || !/^\/services\/[^/]+\/[^/]+\/[^/]+$/.test(url.pathname)
-      || url.search
-      || url.hash) {
-      throw new Error('invalid');
-    }
-    return url.toString();
-  } catch {
-    throw new ConfigError('SLACK_WEBHOOK_URL must be a valid Slack incoming-webhook URL. Run `npm run configure`.');
-  }
-}
-
 function validateUnreadUrl(value) {
   try {
     const url = new URL(value);
@@ -134,20 +117,12 @@ function validateTimezone(value) {
 export function loadConfig({
   env = readProjectEnv(),
   projectRoot = PROJECT_ROOT,
-  requirePortal,
-  requireWebhook,
+  requirePortal = true,
 } = {}) {
   const portalWebhookUrl = validatePortalUrl(env.PORTAL_WEBHOOK_URL);
   const portalCallSecret = validatePortalCallSecret(env.PORTAL_CALL_SECRET);
-  const slackWebhookUrl = requireWebhook === undefined
-    ? null
-    : validateSlackWebhook(env.SLACK_WEBHOOK_URL);
-  const portalRequired = requirePortal ?? (requireWebhook === undefined);
-  if (portalRequired && (!portalWebhookUrl || !portalCallSecret)) {
+  if (requirePortal && (!portalWebhookUrl || !portalCallSecret)) {
     throw new ConfigError('Portal delivery is not configured. Run `npm run configure` in an interactive terminal.');
-  }
-  if (requireWebhook && !slackWebhookUrl) {
-    throw new ConfigError('SLACK_WEBHOOK_URL is not configured. Run `npm run configure` in an interactive terminal.');
   }
 
   const profileSetting = env.LINKEDIN_BROWSER_PROFILE_PATH || DEFAULTS.browserProfilePath;
@@ -159,7 +134,6 @@ export function loadConfig({
     projectRoot,
     portalWebhookUrl,
     portalCallSecret,
-    slackWebhookUrl,
     browserProfilePath,
     outboxPath: path.resolve(projectRoot, DEFAULTS.outboxPath),
     outboxLockPath: path.resolve(projectRoot, DEFAULTS.outboxLockPath),
@@ -183,10 +157,7 @@ export function loadConfig({
 }
 
 export function redactSecrets(value, { secrets = [] } = {}) {
-  let redacted = String(value).replace(
-    /https:\/\/hooks\.slack\.com\/services\/[^\s'"<>]+/gi,
-    '[REDACTED_SLACK_WEBHOOK]',
-  );
+  let redacted = String(value);
   const explicitSecrets = [...new Set(
     secrets.filter((secret) => typeof secret === 'string' && secret),
   )].sort((left, right) => right.length - left.length);

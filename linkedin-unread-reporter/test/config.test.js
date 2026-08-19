@@ -6,7 +6,6 @@ import { ConfigError, loadConfig, parseEnvText, redactSecrets } from '../src/con
 
 const validPortalUrl = 'https://portal.example.test/hooks/linkedin';
 const validCallSecret = 'private-call-secret';
-const validSlackWebhook = ['https://hooks.slack.com', 'services', 'AAA', 'BBB', 'CCC'].join('/');
 
 test('loadConfig applies safe defaults relative to the project root', () => {
   const config = loadConfig({
@@ -108,38 +107,6 @@ test('redactSecrets deduplicates overlapping secrets and redacts longest first',
       secrets: [callSecret, portalUrl, callSecret],
     }),
     '[REDACTED_PORTAL_SECRET] [REDACTED_PORTAL_SECRET]',
-  );
-});
-
-test('redactSecrets still removes Slack webhook URLs without explicit secrets', () => {
-  const redacted = redactSecrets(`Request failed for ${validSlackWebhook}`);
-  assert.equal(redacted, 'Request failed for [REDACTED_SLACK_WEBHOOK]');
-  assert.equal(redacted.includes(validSlackWebhook), false);
-});
-
-test('loadConfig preserves the legacy Slack webhook contract when requested', () => {
-  const config = loadConfig({
-    env: { SLACK_WEBHOOK_URL: validSlackWebhook },
-    projectRoot: '/tmp/reporter',
-    requireWebhook: true,
-  });
-  assert.equal(config.slackWebhookUrl, validSlackWebhook);
-  assert.equal(config.portalWebhookUrl, null);
-  assert.equal(config.portalCallSecret, null);
-});
-
-test('loadConfig validates Slack only when the legacy contract is requested', () => {
-  const env = {
-    PORTAL_WEBHOOK_URL: validPortalUrl,
-    PORTAL_CALL_SECRET: validCallSecret,
-    SLACK_WEBHOOK_URL: 'malformed-legacy-value',
-  };
-  const config = loadConfig({ env, projectRoot: '/tmp/reporter' });
-  assert.equal(config.portalWebhookUrl, validPortalUrl);
-  assert.equal(config.slackWebhookUrl, null);
-  assert.throws(
-    () => loadConfig({ env, projectRoot: '/tmp/reporter', requireWebhook: true }),
-    /SLACK_WEBHOOK_URL/,
   );
 });
 
