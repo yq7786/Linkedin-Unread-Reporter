@@ -134,6 +134,7 @@ export async function runPortalWorkflow({
   save = saveOutbox,
   deliver = deliverReadyEntries,
   capture,
+  fetchImpl = globalThis.fetch,
   writeWork = writeTimestampWork,
   waitForResults = waitForTimestampResults,
   removeSidecars = removeTimestampSidecars,
@@ -191,6 +192,7 @@ export async function runPortalWorkflow({
               callSecret: config.portalCallSecret,
               messages: structuredClone(messages),
               capturedAt: new Date(capturedAt.valueOf()),
+              fetchImpl,
             }));
           },
           signal,

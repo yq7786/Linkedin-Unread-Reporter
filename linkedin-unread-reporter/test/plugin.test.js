@@ -181,11 +181,16 @@ async function listCommitCandidates() {
       cwd: PROJECT_ROOT,
       encoding: 'utf8',
     });
-    if (path.resolve(gitRoot.trim()) !== path.resolve(PROJECT_ROOT)) throw new Error('not project Git root');
+    const resolvedGitRoot = path.resolve(gitRoot.trim());
+    const relativeProjectRoot = path.relative(resolvedGitRoot, PROJECT_ROOT);
+    if (relativeProjectRoot.startsWith('..') || path.isAbsolute(relativeProjectRoot)) {
+      throw new Error('project is outside Git root');
+    }
     const { stdout } = await execFileAsync('git', [
       'ls-files', '--cached', '--others', '--exclude-standard', '-z',
-    ], { cwd: PROJECT_ROOT, encoding: 'utf8' });
-    return stdout.split('\0').filter(Boolean).map((file) => path.join(PROJECT_ROOT, file));
+      '--', relativeProjectRoot || '.',
+    ], { cwd: resolvedGitRoot, encoding: 'utf8' });
+    return stdout.split('\0').filter(Boolean).map((file) => path.join(resolvedGitRoot, file));
   } catch {
     return listArchiveCandidates(PROJECT_ROOT);
   }
@@ -246,17 +251,209 @@ test('archive fallback works without Git metadata and excludes local secrets', a
   }
 });
 
-test('committed project text contains no machine home path or Slack webhook secret', async () => {
-  const gitignore = await fs.readFile(path.join(PROJECT_ROOT, '.gitignore'), 'utf8');
-  assert.match(gitignore, /^\.env\.tmp-\*$/m);
-  for (const file of await listCommitCandidates()) {
-    if (path.basename(file) === 'package-lock.json') continue;
-    const text = await fs.readFile(file, 'utf8').catch(() => '');
-    assert.equal(/\/Users\/[A-Za-z0-9._-]+\//.test(text), false, file);
-    assert.equal(
-      /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+/.test(text),
-      false,
-      file,
-    );
+const forbiddenPrivateContent = [
+  'Ada Lovelace',
+  'Grace Hopper',
+  'Hello from LinkedIn',
+  'Hello\nfrom LinkedIn 👋',
+  'Hello<br>from LinkedIn 👋',
+  'Only visible message',
+  'Private Ada message preview',
+  'Private Grace message content',
+  'Private ignored title',
+  'Private image description',
+  'Private preview one',
+  'Private preview two',
+  'Private restart preview',
+  'Earlier inbound message',
+  'Earlier outbound message',
+  'Hidden stale private message',
+  'Hidden stale thread',
+  'Tooltip timestamp message',
+];
+
+function syntheticContentAllowed(relativePath) {
+  return (
+    relativePath === '.env.example'
+      || relativePath.startsWith('fixtures/')
+      || relativePath.startsWith('test/')
+  );
+}
+
+function clearlySynthetic(value) {
+  return /(?:example|test|fake|fixture|placeholder|replace-me|redacted|sentinel|injected|private-call-secret|private\\nsecret|private\s+secret|shared-secret|token=part|xxx)/i
+    .test(value);
+}
+
+function hasUnsafeMatch(text, pattern, synthetic) {
+  for (const match of text.matchAll(pattern)) {
+    if (!synthetic || !clearlySynthetic(match[0])) return true;
   }
+  return false;
+}
+
+async function resolveCommitCandidateViolations(candidates, root = PROJECT_ROOT) {
+  const violations = [];
+  for (const file of candidates) {
+    const relativePath = path.relative(root, file).split(path.sep).join('/');
+    const basename = path.posix.basename(relativePath);
+    const synthetic = syntheticContentAllowed(relativePath);
+    const forbiddenArtifact = basename === '.env'
+      || basename.startsWith('.env.tmp-')
+      || relativePath.includes('/.linkedin-browser-profile/')
+      || relativePath.startsWith('.linkedin-browser-profile/')
+      || /(?:^|\/)\.linkedin-unread-outbox\.(?:json(?:\.tmp-.*)?|lock.*)$/.test(relativePath)
+      || /^\.linkedin-timestamp-(?:work|results)\.json(?:\.tmp-.*)?$/.test(basename);
+    if (forbiddenArtifact) violations.push(`${relativePath}: private runtime artifact`);
+
+    const text = await fs.readFile(file, 'utf8').catch(() => '');
+    const privatePathPatterns = [
+      /\/Users\/[A-Za-z0-9._-]+\//g,
+      /\/home\/[A-Za-z0-9._-]+\//g,
+      /\b[A-Za-z]:[\\/]Users[\\/][A-Za-z0-9._-]+[\\/]/gi,
+    ];
+    const credentialPatterns = [
+      /https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+/gi,
+      /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/gi,
+      /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+      /\bAKIA[A-Z0-9]{16}\b/g,
+      /\bsk-(?:live-)?[A-Za-z0-9_-]{20,}\b/gi,
+      /PORTAL_CALL_SECRET[ \t]*=[ \t]*[^\s#]+/gi,
+      /(?:["']?portalCallSecret["']?|["']?callSecret["']?)\s*[:=]\s*["'][^"']+["']/gi,
+      /PORTAL_WEBHOOK_URL[ \t]*=[ \t]*https?:\/\/[^\s#]+/gi,
+      /["']?portalWebhookUrl["']?\s*[:=]\s*["']https?:\/\/[^"']+["']/gi,
+      /(?:api[_-]?(?:key|token)|access[_-]?token|auth[_-]?token|bearer[_-]?token|client[_-]?secret)[ \t]*[:=][ \t]*(?:["'][^"']+["']|[A-Za-z0-9_./+=-]+)/gi,
+    ];
+    const unsafePath = privatePathPatterns.some((pattern) => hasUnsafeMatch(text, pattern, synthetic));
+    const unsafeCredentialPattern = credentialPatterns.findIndex((pattern) => (
+      hasUnsafeMatch(text, pattern, synthetic)
+    ));
+    const privateKey = /-----BEGIN (?:RSA |OPENSSH )?PRIVATE KEY-----/.test(text);
+    if (unsafePath || unsafeCredentialPattern >= 0 || privateKey) {
+      const category = unsafePath ? 'machine path'
+        : privateKey ? 'private key' : `credential pattern ${unsafeCredentialPattern}`;
+      violations.push(`${relativePath}: ${category}`);
+    }
+    if (!synthetic && forbiddenPrivateContent.some((value) => text.includes(value))) {
+      violations.push(`${relativePath}: private fixture content outside fixtures/tests`);
+    }
+  }
+  return violations;
+}
+
+test('repository privacy classifier rejects runtime artifacts and private production text', async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'linkedin-privacy-gate-'));
+  try {
+    const actualSecret = ['actual', 'production', 'secret'].join('-');
+    const slackWebhook = [
+      'https://hooks.slack.com/services',
+      'T0123456789',
+      'B0123456789',
+      'abcdefghijklmnopqrstuvwx',
+    ].join('/');
+    const privateKeyHeader = ['-----BEGIN', 'PRIVATE KEY-----'].join(' ');
+    const portalSecretAssignment = `${['PORTAL', 'CALL', 'SECRET'].join('_')}=${actualSecret}`;
+    const portalUrl = `${['https://portal', 'company', 'invalid'].join('.')}/hook`;
+    const genericSecret = ['actual', 'value', '123'].join('-');
+    const genericAssignments = [
+      `${['API', 'TOKEN'].join('_')}=${genericSecret}`,
+      `${['api', 'key'].join('_')}: ${genericSecret}`,
+      `${['access', 'token'].join('_')} = ${genericSecret}`,
+    ];
+    const familyTokens = {
+      slackToken: ['xoxb', '1234567890abcdefghijkl'].join('-'),
+      githubToken: `ghp_${'a'.repeat(24)}`,
+      awsKey: `AKIA${'A1'.repeat(8)}`,
+      stripeStyleKey: ['sk', 'live', 'abcdefghijklmnopqrstuvwxyz'].join('-'),
+    };
+    const forbiddenCases = [
+      ['.env', 'private'],
+      ['.env.tmp-', 'private'],
+      ['.linkedin-browser-profile/Default/Cookies', 'binary-ish'],
+      ['.linkedin-unread-outbox.json', 'private'],
+      ['.linkedin-unread-outbox.json.tmp-', 'private'],
+      ['.linkedin-unread-outbox.lock.tmp-', 'private'],
+      ['.linkedin-timestamp-work.json', 'private'],
+      ['.linkedin-timestamp-results.json.tmp-', 'private'],
+      ['src/mac-home.js', `const path = "${['', 'Users', 'actual-user', 'private'].join('/')}"`],
+      ['src/linux-home.js', `const path = "${['', 'home', 'actual-user', 'private'].join('/')}"`],
+      ['src/windows-home.js', `const path = "${['C:', 'Users', 'actual-user', 'private'].join('/')}"`],
+      ['src/windows-home-backslash.js', `const path = "${['C:', 'Users', 'actual-user', 'private'].join('\\')}"`],
+      ['src/slack.js', slackWebhook],
+      ['src/portal-env.js', portalSecretAssignment],
+      ['src/portal-json.js', JSON.stringify({ portalCallSecret: actualSecret })],
+      ['src/portal-url.js', JSON.stringify({ portalWebhookUrl: portalUrl })],
+      ...genericAssignments.map((content, index) => [`src/generic-token-${index}.env`, content]),
+      ...Object.entries(familyTokens).map(([name, content]) => [`src/${name}.txt`, content]),
+      ['src/private-key.pem', `${privateKeyHeader}\nactual-key-material`],
+      ...forbiddenPrivateContent.map((content, index) => [
+        `src/private-content-${index}.txt`,
+        content,
+      ]),
+    ];
+    const forbiddenFiles = [];
+    for (const [relativePath, content] of forbiddenCases) {
+      const file = path.join(directory, relativePath);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, content);
+      forbiddenFiles.push(file);
+    }
+    const violations = await resolveCommitCandidateViolations(forbiddenFiles, directory);
+    for (const [relativePath] of forbiddenCases) {
+      assert.equal(
+        violations.some((violation) => violation.startsWith(`${relativePath}:`)),
+        true,
+        relativePath,
+      );
+    }
+
+    const allowedCases = [
+      [
+        '.env.example',
+        'PORTAL_WEBHOOK_URL=https://portal.example.test/hook\nPORTAL_CALL_SECRET=replace-me',
+      ],
+      [
+        'fixtures/sanitized.html',
+        'Private Grace message content\nHello\nfrom LinkedIn 👋\nOnly visible message',
+      ],
+      [
+        'test/sanitized.test.js',
+        'const home = "/Users/example/private"; const token = "xoxb-test-placeholder-token"; '
+          + 'const API_TOKEN = "test-placeholder"; '
+          + 'const config = { portalCallSecret: "private-call-secret" }; '
+          + 'const hook = "https://hooks.slack.com/services/test/test/test-placeholder";',
+      ],
+    ];
+    for (const [relativePath, content] of allowedCases) {
+      const file = path.join(directory, relativePath);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, content);
+      assert.deepEqual(
+        await resolveCommitCandidateViolations([file], directory),
+        [],
+        relativePath,
+      );
+    }
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('commit candidates contain no private artifacts, credentials, machine paths, or fixture content', async () => {
+  const gitignore = await fs.readFile(path.join(PROJECT_ROOT, '.gitignore'), 'utf8');
+  for (const pattern of [
+    '.env',
+    '.env.tmp-*',
+    '.linkedin-browser-profile/',
+    '.linkedin-unread-outbox.json',
+    '.linkedin-unread-outbox.json.tmp-*',
+    '.linkedin-unread-outbox.lock*',
+    '.linkedin-timestamp-work.json',
+    '.linkedin-timestamp-work.json.tmp-*',
+    '.linkedin-timestamp-results.json',
+    '.linkedin-timestamp-results.json.tmp-*',
+  ]) {
+    assert.equal(gitignore.split('\n').includes(pattern), true, `missing ignore pattern: ${pattern}`);
+  }
+  assert.deepEqual(await resolveCommitCandidateViolations(await listCommitCandidates()), []);
 });
