@@ -342,6 +342,57 @@ test('waitForTimestampResults rejects timeouts and malformed or non-private resu
   });
 });
 
+test('waitForTimestampResults stops immediately when the lock aborts during polling', async () => {
+  const controller = new AbortController();
+  const compromise = new Error('Outbox lock failed.');
+  let openCalls = 0;
+  let sleepReached = false;
+  const fileSystem = {
+    open: async () => {
+      openCalls += 1;
+      controller.abort(compromise);
+      const error = new Error('missing');
+      error.code = 'ENOENT';
+      throw error;
+    },
+  };
+
+  const pending = waitForTimestampResults({
+    resultPath: '/private/result.json',
+    timeoutMs: 5,
+    pollIntervalMs: 1,
+    fileSystem,
+    signal: controller.signal,
+  }).finally(() => { sleepReached = openCalls > 1; });
+
+  await assert.rejects(pending, compromise);
+  assert.equal(openCalls, 1);
+  assert.equal(sleepReached, false);
+});
+
+test('waitForTimestampResults closes a handle acquired as the lock becomes compromised', async () => {
+  const controller = new AbortController();
+  const compromise = new Error('Outbox lock failed.');
+  let closeCalls = 0;
+  const handle = {
+    close: async () => { closeCalls += 1; },
+  };
+
+  await assert.rejects(waitForTimestampResults({
+    resultPath: '/private/result.json',
+    timeoutMs: 20,
+    signal: controller.signal,
+    fileSystem: {
+      open: async () => {
+        controller.abort(compromise);
+        return handle;
+      },
+    },
+  }), compromise);
+
+  assert.equal(closeCalls, 1);
+});
+
 test('waitForTimestampResults uses one no-follow read handle and validates the same file', async () => {
   const calls = [];
   const result = { version: 1, items: [] };

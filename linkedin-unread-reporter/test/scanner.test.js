@@ -538,6 +538,104 @@ test('captureUnreadMessages processes stored recovery markers before discovering
   assert.equal(result.processedConversations, 2);
 });
 
+test('captureUnreadMessages can run recovery without unread discovery', async () => {
+  const url = threadUrl('recovery-only');
+  const marker = {
+    entryId: 'capture-recovery-only',
+    state: 'capture_pending',
+    leadName: 'Recovery Only',
+    conversationUrl: url,
+    expectedUnreadCount: 1,
+    firstFailureAt: '2026-08-19T03:00:00.000Z',
+    attemptCount: 1,
+  };
+  const adapter = new CaptureAdapter({
+    candidates: [candidate('must-not-discover')],
+    snapshots: {
+      [url]: {
+        conversationUrl: url,
+        unreadBoundaryIndex: 0,
+        messages: [message('recovered')],
+      },
+    },
+  });
+  const { options } = captureOptions(adapter, {
+    outbox: { version: 1, entries: [marker] },
+    recoverPending: true,
+    captureNew: false,
+  });
+
+  const result = await captureUnreadMessages(options);
+
+  assert.equal(result.processedConversations, 1);
+  assert.equal(result.outbox.entries[0].state, 'ready');
+  assert.equal(adapter.gotoCalls, 0);
+  assert.equal(adapter.readCandidateCalls, 0);
+});
+
+test('captureUnreadMessages can discover new rows without retrying recovery markers', async () => {
+  const marker = {
+    entryId: 'capture-new-only',
+    state: 'capture_pending',
+    leadName: 'Pending Recovery',
+    conversationUrl: threadUrl('pending-recovery'),
+    expectedUnreadCount: 1,
+    firstFailureAt: '2026-08-19T03:00:00.000Z',
+    attemptCount: 1,
+  };
+  const adapter = new CaptureAdapter({ candidates: [] });
+  const { options } = captureOptions(adapter, {
+    outbox: { version: 1, entries: [marker] },
+    recoverPending: false,
+    captureNew: true,
+  });
+
+  const result = await captureUnreadMessages(options);
+
+  assert.equal(result.processedConversations, 0);
+  assert.equal(result.outbox.entries[0].state, 'capture_pending');
+  assert.equal(adapter.openCalls, 0);
+  assert.equal(adapter.gotoCalls, 1);
+});
+
+test('captureUnreadMessages stops after a lock abort during browser opening', async () => {
+  const controller = new AbortController();
+  const compromise = new Error('Outbox lock failed.');
+  const adapter = new CaptureAdapter({ candidates: [candidate('abort-open')] });
+  let threadReads = 0;
+  adapter.openConversation = async () => {
+    adapter.openCalls += 1;
+    controller.abort(compromise);
+  };
+  adapter.readThreadMessages = async () => { threadReads += 1; };
+  const { options, saved } = captureOptions(adapter, { signal: controller.signal });
+
+  await assert.rejects(captureUnreadMessages(options), compromise);
+
+  assert.equal(adapter.openCalls, 1);
+  assert.equal(threadReads, 0);
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0].entries[0].state, 'capture_pending');
+});
+
+test('captureUnreadMessages gives lock compromise precedence when browser opening rejects', async () => {
+  const controller = new AbortController();
+  const compromise = new Error('Outbox lock failed.');
+  const adapter = new CaptureAdapter({ candidates: [candidate('abort-reject')] });
+  let threadReads = 0;
+  adapter.openConversation = async () => {
+    controller.abort(compromise);
+    throw new Error('private browser failure');
+  };
+  adapter.readThreadMessages = async () => { threadReads += 1; };
+  const { options, saved } = captureOptions(adapter, { signal: controller.signal });
+
+  await assert.rejects(captureUnreadMessages(options), compromise);
+
+  assert.equal(threadReads, 0);
+  assert.equal(saved.length, 1);
+});
+
 test('captureUnreadMessages does not reopen a new candidate matching a processed recovery URL', async () => {
   const url = threadUrl('same-recovery');
   const marker = {

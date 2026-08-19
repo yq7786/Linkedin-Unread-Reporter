@@ -43,6 +43,19 @@ const RECOVERABLE_MESSAGE_CODES = new Set([
   'visible-content-invalid',
 ]);
 
+function checkpoint(signal) {
+  signal?.throwIfAborted();
+}
+
+async function checkedAwait(signal, operation) {
+  checkpoint(signal);
+  try {
+    return await operation();
+  } finally {
+    checkpoint(signal);
+  }
+}
+
 function isRecoverableCaptureError(error) {
   if (error instanceof LinkedInBlockerError) return false;
   if (error instanceof ScanInvariantError) return RECOVERABLE_SCAN_CODES.has(error.code);
@@ -170,31 +183,44 @@ export async function captureUnreadMessages({
   scanStartedAt,
   cap = 50,
   authTimeoutMs = 900_000,
+  recoverPending = true,
+  captureNew = true,
+  signal,
 }) {
   if (!Number.isInteger(cap) || cap < 1 || cap > 50) {
     throw new Error('Capture conversation cap must be an integer from 1 to 50.');
   }
+  if (typeof recoverPending !== 'boolean' || typeof captureNew !== 'boolean') {
+    throw new Error('Capture phase options are invalid.');
+  }
+  checkpoint(signal);
   let currentOutbox = validateOutbox(outbox);
   const scanStartedAtIso = normalizeScanStartedAt(scanStartedAt);
   let processedConversations = 0;
   let capturedMessages = 0;
 
   const persist = async (nextOutbox) => {
+    checkpoint(signal);
     validateOutbox(nextOutbox);
-    await saveOutbox(nextOutbox);
+    await checkedAwait(signal, () => saveOutbox(nextOutbox));
+    checkpoint(signal);
     currentOutbox = nextOutbox;
   };
 
   const captureMarker = async (marker, { alreadyOpen = false, newMarker = false } = {}) => {
     let attemptsThisRun = 0;
     while (attemptsThisRun < MAX_CAPTURE_ATTEMPTS) {
+      checkpoint(signal);
       attemptsThisRun += 1;
       let entries;
       try {
         if (!(alreadyOpen && attemptsThisRun === 1)) {
-          await adapter.openConversation({ conversationUrl: marker.conversationUrl });
+          await checkedAwait(signal, () => adapter.openConversation({
+            conversationUrl: marker.conversationUrl,
+          }));
         }
-        const snapshot = await adapter.readThreadMessages();
+        const snapshot = await checkedAwait(signal, () => adapter.readThreadMessages());
+        checkpoint(signal);
         entries = makeMessageEntries({
           marker,
           snapshot,
@@ -205,7 +231,10 @@ export async function captureUnreadMessages({
         if (!isRecoverableCaptureError(error)) throw error;
         continue;
       }
-      await persist(replaceEntry(currentOutbox, marker.entryId, entries));
+      await checkedAwait(signal, () => persist(
+        replaceEntry(currentOutbox, marker.entryId, entries),
+      ));
+      checkpoint(signal);
       capturedMessages += entries.length;
       return;
     }
@@ -214,7 +243,9 @@ export async function captureUnreadMessages({
       ? MAX_CAPTURE_ATTEMPTS - 1
       : MAX_CAPTURE_ATTEMPTS);
     const retainedMarker = { ...marker, attemptCount: failedAttempts };
-    await persist(replaceEntry(currentOutbox, marker.entryId, [retainedMarker]));
+    await checkedAwait(signal, () => persist(
+      replaceEntry(currentOutbox, marker.entryId, [retainedMarker]),
+    ));
   };
 
   const recoveryMarkers = currentOutbox.entries
@@ -223,24 +254,30 @@ export async function captureUnreadMessages({
   const recoveredConversationUrls = new Set(
     recoveryMarkers.map(({ conversationUrl }) => conversationUrl),
   );
-  for (const marker of recoveryMarkers) {
-    await captureMarker(marker);
-    processedConversations += 1;
+  if (recoverPending) {
+    for (const marker of recoveryMarkers) {
+      checkpoint(signal);
+      await checkedAwait(signal, () => captureMarker(marker));
+      checkpoint(signal);
+      processedConversations += 1;
+    }
   }
 
   const processedRowIds = new Set();
   let processedNewConversations = 0;
   let truncated = false;
-  while (true) {
-    await adapter.gotoUnread(unreadUrl);
-    await adapter.waitForUnblocked(authTimeoutMs);
-    const candidates = await adapter.readUnreadCandidates({
+  while (captureNew) {
+    checkpoint(signal);
+    await checkedAwait(signal, () => adapter.gotoUnread(unreadUrl));
+    await checkedAwait(signal, () => adapter.waitForUnblocked(authTimeoutMs));
+    const candidates = await checkedAwait(signal, () => adapter.readUnreadCandidates({
       limit: 1,
       excludeRowIds: [...processedRowIds],
-    });
+    }));
     if (candidates.length === 0) break;
 
     const candidate = candidates[0];
+    checkpoint(signal);
     processedRowIds.add(candidate.rowId);
     if (candidate.conversationUrl !== null && candidate.conversationUrl !== undefined
       && recoveredConversationUrls.has(validateConversationUrl(candidate.conversationUrl))) {
@@ -259,23 +296,34 @@ export async function captureUnreadMessages({
         expectedUnreadCount: candidate.unreadCount,
         firstFailureAt: scanStartedAtIso,
       });
-      await persist({ ...currentOutbox, entries: [...currentOutbox.entries, marker] });
-      await captureMarker(marker, { newMarker: true });
+      await checkedAwait(signal, () => persist({
+        ...currentOutbox,
+        entries: [...currentOutbox.entries, marker],
+      }));
+      await checkedAwait(signal, () => captureMarker(marker, { newMarker: true }));
     } else {
-      await adapter.openConversation(candidate, {
+      await checkedAwait(signal, () => adapter.openConversation(candidate, {
         onOpened: async (conversationUrl) => {
+          checkpoint(signal);
           marker = makeCaptureMarker({
             leadName: candidate.leadName,
             conversationUrl,
             expectedUnreadCount: candidate.unreadCount,
             firstFailureAt: scanStartedAtIso,
           });
-          await persist({ ...currentOutbox, entries: [...currentOutbox.entries, marker] });
+          await checkedAwait(signal, () => persist({
+            ...currentOutbox,
+            entries: [...currentOutbox.entries, marker],
+          }));
         },
-      });
+      }));
       if (!marker) throw new Error('Opened conversation was not checkpointed.');
-      await captureMarker(marker, { alreadyOpen: true, newMarker: true });
+      await checkedAwait(signal, () => captureMarker(marker, {
+        alreadyOpen: true,
+        newMarker: true,
+      }));
     }
+    checkpoint(signal);
     processedConversations += 1;
     processedNewConversations += 1;
   }

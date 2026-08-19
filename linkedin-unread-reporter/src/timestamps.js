@@ -7,6 +7,45 @@ import { validateOutbox } from './outbox.js';
 
 const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set(['EINVAL', 'ENOSYS', 'ENOTSUP']);
 
+function checkpoint(signal) {
+  signal?.throwIfAborted();
+}
+
+async function checkedAwait(signal, operation) {
+  checkpoint(signal);
+  try {
+    return await operation();
+  } finally {
+    checkpoint(signal);
+  }
+}
+
+async function closeResultHandle({ resultHandle, signal, primaryError }) {
+  let closeError;
+  try {
+    await resultHandle.close();
+  } catch {
+    closeError = new Error('Timestamp result close failed.');
+  }
+  checkpoint(signal);
+  if (primaryError) throw primaryError;
+  if (closeError) throw closeError;
+}
+
+function abortableDelay(milliseconds, signal) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(signal.reason);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export async function removeTimestampSidecars({ workPath, resultPath, fileSystem = fs }) {
   await cleanupPreserving(undefined, [
     async () => fileSystem.rm(workPath, { force: true }),
@@ -19,6 +58,7 @@ export async function waitForTimestampResults({
   timeoutMs,
   pollIntervalMs = 1_000,
   fileSystem = fs,
+  signal,
 }) {
   if (typeof resultPath !== 'string'
     || !resultPath
@@ -28,26 +68,35 @@ export async function waitForTimestampResults({
     || pollIntervalMs <= 0) invalid();
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    checkpoint(signal);
     let resultHandle;
+    let openError;
     try {
       resultHandle = await fileSystem.open(
         resultPath,
         fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
       );
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw new Error('Timestamp result read failed.');
+      openError = error;
+    }
+    if (signal?.aborted && resultHandle) {
+      await closeResultHandle({ resultHandle, signal });
+    }
+    checkpoint(signal);
+    if (openError) {
+      if (openError?.code !== 'ENOENT') throw new Error('Timestamp result read failed.');
     }
 
     if (resultHandle) {
       let result;
       let primaryError;
       try {
-        const openedStat = await resultHandle.stat();
+        const openedStat = await checkedAwait(signal, () => resultHandle.stat());
         if (!openedStat.isFile() || (openedStat.mode & 0o777) !== 0o600) {
           throw new Error('Timestamp result permissions are invalid.');
         }
-        const text = await resultHandle.readFile('utf8');
-        const pathStat = await fileSystem.lstat(resultPath);
+        const text = await checkedAwait(signal, () => resultHandle.readFile('utf8'));
+        const pathStat = await checkedAwait(signal, () => fileSystem.lstat(resultPath));
         if (!pathStat.isFile()
           || pathStat.dev !== openedStat.dev
           || pathStat.ino !== openedStat.ino) invalid();
@@ -58,24 +107,22 @@ export async function waitForTimestampResults({
         }
         validateTimestampResult(result);
       } catch (error) {
-        primaryError = [
+        primaryError = signal?.aborted ? signal.reason : [
           'Timestamp data is invalid.',
           'Timestamp result permissions are invalid.',
         ].includes(error?.message)
           ? error
           : new Error('Timestamp result read failed.');
       }
-      try {
-        await resultHandle.close();
-      } catch {
-        if (!primaryError) primaryError = new Error('Timestamp result close failed.');
-      }
-      if (primaryError) throw primaryError;
+      await closeResultHandle({ resultHandle, signal, primaryError });
       return result;
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error('Timestamp result polling timed out.');
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, remaining)));
+    await checkedAwait(signal, () => abortableDelay(
+      Math.min(pollIntervalMs, remaining),
+      signal,
+    ));
   }
 }
 
