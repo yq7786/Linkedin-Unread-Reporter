@@ -217,6 +217,9 @@ test('new scan safety codes reconstruct static messages and ignore mutated messa
     'conversation-row-url-changed',
     'candidate-revalidation-failed',
     'conversation-list-progress-invalid',
+    'conversation-open-active-row-ambiguous',
+    'conversation-open-active-row-missing',
+    'conversation-open-list-not-uniquely-visible',
     'conversation-open-row-mismatch',
   ]) {
     const error = new ScanInvariantError(code);

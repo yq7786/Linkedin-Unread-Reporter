@@ -136,7 +136,7 @@ browserTest('anchorless opening rejects a valid thread URL when no row becomes a
     authTimeoutMs: 1_000, recoveryOptions: { pollIntervalMs: 10 },
   }).openConversation({ rowId: 'expected', conversationUrl: null }, {
     onOpened: async () => { checkpoints += 1; },
-  }), (error) => error instanceof ScanInvariantError && error.code === 'conversation-open-row-mismatch');
+  }), (error) => error instanceof ScanInvariantError && error.code === 'conversation-open-active-row-missing');
   assert.equal(checkpoints, 0);
 });
 
@@ -380,6 +380,66 @@ browserTest('anchorless opening waits for a delayed SPA URL and checkpoints befo
   ]);
 });
 
+browserTest('anchorless opening accepts the current LinkedIn convo-item-link active marker', async (page) => {
+  const unreadUrl = 'https://www.linkedin.com/messaging/?filter=unread';
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/convo-link-active/';
+  const fixture = `
+    <ul data-reporter-conversation-list>
+      <li data-reporter-row-id="expected" class="msg-conversation-listitem--unread"
+          onclick="history.pushState({}, '', '${threadUrl}'); this.querySelector('a').classList.add('msg-conversations-container__convo-item-link--active')">
+        <a class="msg-conversations-container__convo-item-link">Open</a>
+        <h3 data-reporter-name>Expected</h3>
+        <span aria-label="1 unread message"></span>
+      </li>
+    </ul>
+    <section class="msg-thread">Thread</section>
+  `;
+  await page.route(unreadUrl, (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  await page.goto(unreadUrl);
+  const events = [];
+  await new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 2_000,
+    recoveryOptions: { pollIntervalMs: 10 },
+  }).openConversation(
+    { rowId: 'expected', conversationUrl: null },
+    { onOpened: async (url) => events.push(['checkpoint', url]) },
+  );
+  assert.deepEqual(events, [['checkpoint', threadUrl]]);
+});
+
+browserTest('anchorless opening ignores a pre-existing thread URL until the clicked row is active', async (page) => {
+  const alreadyOpenUrl = 'https://www.linkedin.com/messaging/thread/already-open/';
+  const expectedUrl = 'https://www.linkedin.com/messaging/thread/expected-open/';
+  const fixture = `
+    <button aria-pressed="true">Unread</button>
+    <ul data-reporter-conversation-list>
+      <li data-reporter-row-id="expected" class="msg-conversation-listitem--unread"
+          onclick="setTimeout(() => { history.pushState({}, '', '${expectedUrl}'); this.classList.add('active'); }, 80)">
+        <h3 data-reporter-name>Expected</h3>
+        <span aria-label="1 unread message"></span>
+      </li>
+    </ul>
+    <section class="msg-thread">Thread</section>
+  `;
+  await page.route('https://www.linkedin.com/messaging/**', (route) => (
+    route.fulfill({ contentType: 'text/html', body: fixture })
+  ));
+  await page.goto(alreadyOpenUrl);
+  const events = [];
+  const adapter = new PlaywrightLinkedInAdapter(page, {
+    authTimeoutMs: 2_000,
+    recoveryOptions: { pollIntervalMs: 10 },
+  });
+
+  await adapter.openConversation(
+    { rowId: 'expected', conversationUrl: null },
+    { onOpened: async (url) => events.push(['checkpoint', url]) },
+  );
+
+  assert.deepEqual(events, [['checkpoint', expectedUrl]]);
+  assert.equal(page.url(), expectedUrl);
+});
+
 browserTest('anchorless opening rejects a valid thread URL owned by a different active row', async (page) => {
   const unreadUrl = 'https://www.linkedin.com/messaging/?filter=unread';
   const wrongUrl = 'https://www.linkedin.com/messaging/thread/wrong-valid-thread/';
@@ -558,6 +618,188 @@ browserTest('readThreadMessages extracts visible direction, content type, id, an
     sentAtRaw: '5 min ago',
   });
   assert.doesNotMatch(JSON.stringify(snapshot), /Hidden stale|Private ignored|Private image/);
+});
+
+browserTest('readThreadMessages keeps a weekday date heading for timestamp conversion', async (page) => {
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/time-heading/';
+  const fixture = `
+    <section class="msg-thread">
+      <div class="msg-s-message-list__event">
+        <time class="msg-s-message-list__time-heading">Wednesday</time>
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized inbound</p>
+          <time class="msg-s-message-group__timestamp">11:35 AM</time>
+        </div>
+      </div>
+    </section>
+  `;
+  await page.route(threadUrl, (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  await page.goto(threadUrl);
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+  assert.equal(snapshot.messages.length, 1);
+  assert.deepEqual(snapshot.messages[0], {
+    linkedinMessageId: null,
+    direction: 'inbound',
+    contentType: 'text',
+    content: 'Sanitized inbound',
+    sentAt: null,
+    sentAtRaw: 'Wednesday at 11:35 AM',
+  });
+});
+
+browserTest('readThreadMessages keeps Today and Yesterday dividers for timestamp conversion', async (page) => {
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/relative-dividers/';
+  const fixture = `
+    <section class="msg-thread">
+      <li class="msg-s-message-list__event">
+        <time class="msg-s-message-list__time-heading">Yesterday</time>
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized yesterday</p>
+          <time class="msg-s-message-group__timestamp">4:05 PM</time>
+        </div>
+      </li>
+      <li class="msg-s-message-list__event">
+        <time class="msg-s-message-list__time-heading">TODAY</time>
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized today</p>
+          <time class="msg-s-message-group__timestamp">10:40 AM</time>
+        </div>
+      </li>
+    </section>
+  `;
+  await page.route(threadUrl, (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  await page.goto(threadUrl);
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+  assert.deepEqual(snapshot.messages.map(({ sentAt, sentAtRaw }) => ({ sentAt, sentAtRaw })), [
+    { sentAt: null, sentAtRaw: 'Yesterday at 4:05 PM' },
+    { sentAt: null, sentAtRaw: 'Today at 10:40 AM' },
+  ]);
+});
+
+browserTest('readThreadMessages combines a LinkedIn date divider with the message clock', async (page) => {
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/date-divider/';
+  const fixture = `
+    <section class="msg-thread">
+      <li class="msg-s-message-list__event">
+        <time class="msg-s-message-list__time-heading">DEC 11, 2025</time>
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized inbound</p>
+          <time class="msg-s-message-group__timestamp">10:40 AM</time>
+        </div>
+      </li>
+      <li class="msg-s-message-list__event">
+        <div class="msg-s-event-listitem">
+          <p class="msg-s-event-listitem__body">Sanitized outbound</p>
+          <time class="msg-s-message-group__timestamp">11:04 AM</time>
+          <span class="msg-s-event-with-indicator__sending-indicator msg-s-event-with-indicator__sending-indicator--sent"></span>
+        </div>
+      </li>
+      <li class="msg-s-message-list__event">
+        <time class="msg-s-message-list__time-heading">DEC 12, 2025</time>
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized next day</p>
+          <time class="msg-s-message-group__timestamp">9:15 AM</time>
+        </div>
+      </li>
+    </section>
+  `;
+  await page.route(threadUrl, (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  await page.goto(threadUrl);
+  const [dec11Morning, dec11Later, dec12] = await page.evaluate(() => [
+    new Date(2025, 11, 11, 10, 40).toISOString(),
+    new Date(2025, 11, 11, 11, 4).toISOString(),
+    new Date(2025, 11, 12, 9, 15).toISOString(),
+  ]);
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+  assert.deepEqual(snapshot.messages.map(({ sentAt, sentAtRaw }) => ({ sentAt, sentAtRaw })), [
+    { sentAt: dec11Morning, sentAtRaw: 'December 11, 2025 at 10:40 AM' },
+    { sentAt: dec11Later, sentAtRaw: 'December 11, 2025 at 11:04 AM' },
+    { sentAt: dec12, sentAtRaw: 'December 12, 2025 at 9:15 AM' },
+  ]);
+});
+
+browserTest('readThreadMessages infers the year for a month-day date divider', async (page) => {
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/month-day-divider/';
+  const fixture = `
+    <section class="msg-thread">
+      <li class="msg-s-message-list__event">
+        <time class="msg-s-message-list__time-heading">APR 27</time>
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized april</p>
+          <time class="msg-s-message-group__timestamp">11:01 AM</time>
+        </div>
+      </li>
+      <li class="msg-s-message-list__event">
+        <div class="msg-s-event-listitem">
+          <p class="msg-s-event-listitem__body">Sanitized same day</p>
+          <time class="msg-s-message-group__timestamp">1:22 PM</time>
+          <span class="msg-s-event-with-indicator__sending-indicator msg-s-event-with-indicator__sending-indicator--sent"></span>
+        </div>
+      </li>
+      <li class="msg-s-message-list__event">
+        <time class="msg-s-message-list__time-heading">MAY 4</time>
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized may</p>
+          <time class="msg-s-message-group__timestamp">12:17 PM</time>
+        </div>
+      </li>
+    </section>
+  `;
+  await page.route(threadUrl, (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  await page.goto(threadUrl);
+  const expected = await page.evaluate(() => {
+    const inferYear = (month, day) => {
+      const now = new Date();
+      let year = now.getFullYear();
+      const candidate = new Date(year, month, day, 23, 59, 59, 999);
+      if (candidate > now) year -= 1;
+      return year;
+    };
+    const aprilYear = inferYear(3, 27);
+    const mayYear = inferYear(4, 4);
+    return {
+      aprilMorning: new Date(aprilYear, 3, 27, 11, 1).toISOString(),
+      aprilAfternoon: new Date(aprilYear, 3, 27, 13, 22).toISOString(),
+      may: new Date(mayYear, 4, 4, 12, 17).toISOString(),
+      aprilRaw: `April 27, ${aprilYear} at 11:01 AM`,
+      aprilLaterRaw: `April 27, ${aprilYear} at 1:22 PM`,
+      mayRaw: `May 4, ${mayYear} at 12:17 PM`,
+    };
+  });
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+  assert.deepEqual(snapshot.messages.map(({ sentAt, sentAtRaw }) => ({ sentAt, sentAtRaw })), [
+    { sentAt: expected.aprilMorning, sentAtRaw: expected.aprilRaw },
+    { sentAt: expected.aprilAfternoon, sentAtRaw: expected.aprilLaterRaw },
+    { sentAt: expected.may, sentAtRaw: expected.mayRaw },
+  ]);
+});
+
+browserTest('readThreadMessages classifies a LinkedIn outbound event that only exposes a sent indicator', async (page) => {
+  const threadUrl = 'https://www.linkedin.com/messaging/thread/sent-indicator/';
+  const fixture = `
+    <section class="msg-thread">
+      <li class="msg-s-message-list__event">
+        <div class="msg-s-event-listitem msg-s-event-listitem--other">
+          <p class="msg-s-event-listitem__body">Sanitized inbound</p>
+          <time class="msg-s-message-group__timestamp">3:10 PM</time>
+        </div>
+      </li>
+      <li class="msg-s-message-list__event">
+        <div class="msg-s-event-listitem">
+          <p class="msg-s-event-listitem__body">Sanitized outbound</p>
+          <time class="msg-s-message-group__timestamp">12:17 PM</time>
+          <span class="msg-s-event-with-indicator__sending-indicator msg-s-event-with-indicator__sending-indicator--sent"></span>
+        </div>
+      </li>
+    </section>
+  `;
+  await page.route(threadUrl, (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
+  await page.goto(threadUrl);
+  const snapshot = await new PlaywrightLinkedInAdapter(page).readThreadMessages();
+  assert.deepEqual(snapshot.messages.map(({ direction, content }) => ({ direction, content })), [
+    { direction: 'inbound', content: 'Sanitized inbound' },
+    { direction: 'outbound', content: 'Sanitized outbound' },
+  ]);
 });
 
 browserTest('thread extraction records visible non-text labels without following links', async (page) => {

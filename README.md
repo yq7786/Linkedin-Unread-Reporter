@@ -49,7 +49,14 @@ Share this GitHub repository with a teammate. In Codex, they can provide its URL
 Use $skill-installer to install yq7786/Linkedin-Unread-Reporter with --path linkedin-unread-reporter.
 ```
 
-The complete reporter is installed with the skill, so no separate application clone or plugin installation is required. On the next turn, ask: `Use $linkedin-unread-reporter to set it up.` Codex installs dependencies, asks for the Portal Webhook URL and `PORTAL_CALL_SECRET` in chat, transfers them to the configurator through hidden PTY input, prepares the persistent LinkedIn login, runs the supervised dry scan, and asks for approval before the first `npm run deliver`. It creates the three fixed schedules only when count-only evidence shows both `capturedMessages > 0` and `Created + Duplicates + Assumed duplicates > 0`; otherwise, it must defer all schedules and tell the user to rerun setup after unread messages exist. The supplied values remain in that teammate's Codex chat history but are never repeated, logged, or embedded in an automation prompt.
+The complete reporter is installed with the skill, so no separate application clone or plugin installation is required. On the next turn, ask: `Use $linkedin-unread-reporter to set it up.` Codex installs dependencies, asks once in chat for `PORTAL_WEBHOOK_URL` and `PORTAL_CALL_SECRET` together in this format:
+
+```text
+PORTAL_WEBHOOK_URL: <https-url>
+PORTAL_CALL_SECRET: <secret>
+```
+
+It transfers those values to the configurator through hidden PTY input, prepares the persistent LinkedIn login, runs the supervised dry scan, and asks for approval before the first `npm run deliver`. It creates the three fixed schedules only when count-only evidence shows both `capturedMessages > 0` and `Created + Duplicates + Assumed duplicates > 0`; otherwise, it must defer all schedules and tell the user to rerun setup after unread messages exist. The supplied values remain in that teammate's Codex chat history but are never repeated, logged, or embedded in an automation prompt.
 
 If direct download fails because the local Python trust store cannot validate GitHub's certificate chain, retry the same named path with the installer's supported `--method git` option. Never disable TLS verification or use an unverified download.
 
@@ -61,7 +68,7 @@ Create the three weekday schedules—7:00am, 12:00pm, and 4:00pm—in `Australia
 
 - `.env`, `.linkedin-browser-profile/`, the private outbox, timestamp sidecars, temporary files, and locks are gitignored.
 - `.env`, `.linkedin-unread-outbox.json`, `.linkedin-timestamp-work.json`, and `.linkedin-timestamp-results.json` are written with mode `0600`.
-- The durable outbox supports checkpoint and recovery but is never read or summarized by Codex or timestamp subagents.
+- The durable outbox supports checkpoint and recovery. Timestamp-only subagents never read it. The operating agent may read `.env`, the outbox, and timestamp sidecars when debugging.
 - No LinkedIn username, password, cookie, name, message content, timestamp, or thread identifier is logged.
 - Portal credentials never belong in a shell command, command-line argument, automation prompt, or task output.
 - Capture fails closed when eligibility, unread state, thread identity, unread boundary, direction, message content, or timestamp is ambiguous.

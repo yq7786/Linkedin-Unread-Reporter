@@ -72,6 +72,9 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.doesNotMatch(skill, /Run `npm test`/);
   assert.match(metadata, /\$linkedin-unread-reporter/);
 
+  assert.match(skill, /Please provide `PORTAL_WEBHOOK_URL` and `PORTAL_CALL_SECRET` together/);
+  assert.match(skill, /operating agent may read/i);
+  assert.doesNotMatch(skill, /must never be read or summarized by Codex/);
   for (const document of [skill, readme]) {
     assert.match(document, /PORTAL_WEBHOOK_URL/);
     assert.match(document, /PORTAL_CALL_SECRET/);

@@ -245,8 +245,12 @@ test('skill collects portal credentials in chat and transfers them only through 
   assert.match(skill, /- `SKILL\.md`/);
   assert.match(skill, /references\/automation-setup\.md/);
   assert.match(skill, /stop immediately/i);
-  assert.match(skill, /Please provide the Portal Webhook URL\./);
-  assert.match(skill, /Please provide `PORTAL_CALL_SECRET`\./);
+  assert.match(skill, /Please provide `PORTAL_WEBHOOK_URL` and `PORTAL_CALL_SECRET` together/);
+  assert.match(skill, /PORTAL_WEBHOOK_URL: <https-url>/);
+  assert.match(skill, /PORTAL_CALL_SECRET: <secret>/);
+  assert.doesNotMatch(skill, /Please provide the Portal Webhook URL\./);
+  assert.doesNotMatch(skill, /When its first hidden prompt appears/);
+  assert.doesNotMatch(skill, /When its second hidden prompt appears/);
   assert.match(skill, /PORTAL_WEBHOOK_URL/);
   assert.match(skill, /HTTPS/);
   assert.match(skill, /chat history/i);
@@ -254,7 +258,8 @@ test('skill collects portal credentials in chat and transfers them only through 
   assert.match(skill, /hidden input/i);
   assert.match(skill, /Never put either value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output\./);
   assert.match(skill, /Never quote, summarize, visibly validate, or repeat either value/i);
-  assert.match(skill, /Do not read `\.env` back/i);
+  assert.match(skill, /operating agent may read/i);
+  assert.doesNotMatch(skill, /must never be read or summarized by Codex/);
   assert.doesNotMatch(skill, /paste their current webhook into that hidden prompt/i);
 });
 

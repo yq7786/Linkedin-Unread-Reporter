@@ -55,11 +55,99 @@ const ACTIVE_ROW_SELECTOR = [
   '.active',
   '.msg-conversation-listitem--active',
   '.msg-conversation-card__convo-item-container--active',
+  '.msg-conversations-container__convo-item-link--active',
   '[aria-current="true"]',
   '[aria-selected="true"]',
 ].join(',');
 
 const DEFAULT_UNREAD_URL = 'https://www.linkedin.com/messaging/?filter=unread';
+
+const MONTH_ALIASES = Object.freeze({
+  january: 'January',
+  jan: 'January',
+  february: 'February',
+  feb: 'February',
+  march: 'March',
+  mar: 'March',
+  april: 'April',
+  apr: 'April',
+  may: 'May',
+  june: 'June',
+  jun: 'June',
+  july: 'July',
+  jul: 'July',
+  august: 'August',
+  aug: 'August',
+  september: 'September',
+  sept: 'September',
+  sep: 'September',
+  october: 'October',
+  oct: 'October',
+  november: 'November',
+  nov: 'November',
+  december: 'December',
+  dec: 'December',
+});
+const MONTH_NAME_PATTERN = 'January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec';
+
+function expandMonthName(value) {
+  return MONTH_ALIASES[String(value || '').trim().toLowerCase()] || null;
+}
+
+function normalizeClockLabel(clock) {
+  const clockText = typeof clock === 'string' ? clock.replace(/\s+/g, ' ').trim() : '';
+  const clockMatch = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(clockText);
+  if (!clockMatch) return null;
+  return `${clockMatch[1]}:${clockMatch[2]} ${clockMatch[3].toUpperCase()}`;
+}
+
+function inferYearForMonthDay(month, day, now) {
+  const isValid = (year) => {
+    const date = new Date(year, month, day);
+    return date.getFullYear() === year && date.getMonth() === month && date.getDate() === day;
+  };
+  const currentYear = now.getFullYear();
+  if (month > now.getMonth() || (month === now.getMonth() && day > now.getDate())) {
+    return isValid(currentYear - 1) ? currentYear - 1 : null;
+  }
+  return isValid(currentYear) ? currentYear : null;
+}
+
+function combineDateHeadingAndClock(heading, clock, now = new Date()) {
+  const headingText = typeof heading === 'string' ? heading.replace(/\s+/g, ' ').trim() : '';
+  const clockLabel = normalizeClockLabel(clock);
+  const dateMatch = new RegExp(
+    `^(${MONTH_NAME_PATTERN})\\.?\\s+(\\d{1,2})(?:,?\\s+(\\d{4}))?$`,
+    'i',
+  ).exec(headingText);
+  if (!clockLabel || !dateMatch) return null;
+  const monthName = expandMonthName(dateMatch[1]);
+  if (!monthName) return null;
+  const month = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+  ].indexOf(monthName);
+  const day = Number(dateMatch[2]);
+  const year = dateMatch[3] ? Number(dateMatch[3]) : inferYearForMonthDay(month, day, now);
+  if (!Number.isInteger(year) || year < 1970) return null;
+  return `${monthName} ${day}, ${year} at ${clockLabel}`;
+}
+
+function combineRelativeDateHeadingAndClock(heading, clock) {
+  const headingText = typeof heading === 'string' ? heading.replace(/\s+/g, ' ').trim() : '';
+  const clockLabel = normalizeClockLabel(clock);
+  const relativeMatch = /^(today|yesterday|monday|tuesday|wednesday|thursday|friday|saturday|sunday)$/i.exec(headingText);
+  if (!clockLabel || !relativeMatch) return null;
+  const label = relativeMatch[1].toLowerCase();
+  const headingLabel = `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+  return `${headingLabel} at ${clockLabel}`;
+}
+
+function looksLikeCalendarDate(value) {
+  const normalized = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  return new RegExp(`^(?:${MONTH_NAME_PATTERN})\\.?\\s+\\d{1,2}(?:,?\\s+\\d{4})?$`, 'i').test(normalized)
+    || /^\d{4}-\d{2}-\d{2}$/.test(normalized);
+}
 
 function classifyExactTimestamp(value) {
   const normalized = typeof value === 'string' ? value.trim() : '';
@@ -81,19 +169,43 @@ function classifyExactTimestamp(value) {
   }
   if (/^\d{4}-\d{2}-\d{2}T/.test(normalized)) return { kind: 'invalid' };
 
-  const englishMatch = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(normalized);
+  const monthAliases = {
+    january: 0,
+    jan: 0,
+    february: 1,
+    feb: 1,
+    march: 2,
+    mar: 2,
+    april: 3,
+    apr: 3,
+    may: 4,
+    june: 5,
+    jun: 5,
+    july: 6,
+    jul: 6,
+    august: 7,
+    aug: 7,
+    september: 8,
+    sept: 8,
+    sep: 8,
+    october: 9,
+    oct: 9,
+    november: 10,
+    nov: 10,
+    december: 11,
+    dec: 11,
+  };
+  const englishMatch = /^(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2}),?\s+(\d{4})\s+at\s+(\d{1,2}):(\d{2})\s*(AM|PM)$/i.exec(normalized);
   if (englishMatch) {
-    const monthNames = [
-      'january', 'february', 'march', 'april', 'may', 'june',
-      'july', 'august', 'september', 'october', 'november', 'december',
-    ];
     const [, monthName, dayText, yearText, hourText, minuteText, meridiem] = englishMatch;
     const year = Number(yearText);
-    const month = monthNames.indexOf(monthName.toLowerCase());
+    const month = monthAliases[monthName.toLowerCase()];
     const day = Number(dayText);
     const twelveHour = Number(hourText);
     const minute = Number(minuteText);
-    if (twelveHour < 1 || twelveHour > 12 || minute > 59) return { kind: 'invalid' };
+    if (month === undefined || twelveHour < 1 || twelveHour > 12 || minute > 59) {
+      return { kind: 'invalid' };
+    }
     const hour = (twelveHour % 12) + (meridiem.toUpperCase() === 'PM' ? 12 : 0);
     const timestamp = new Date(year, month, day, hour, minute, 0, 0);
     if (timestamp.getFullYear() !== year
@@ -105,7 +217,7 @@ function classifyExactTimestamp(value) {
     }
     return { kind: 'exact', sentAt: timestamp.toISOString() };
   }
-  if (/^(?:January|February|March|April|May|June|July|August|September|October|November|December)\b/i.test(normalized)
+  if (/^(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\b/i.test(normalized)
     && /\b\d{4}\b/.test(normalized)) {
     return { kind: 'invalid' };
   }
@@ -298,7 +410,7 @@ export class PlaywrightLinkedInAdapter {
   }
 
   async inspectState() {
-    return this.pageOperation(() => this.page.evaluate(({ rowSelector, listSelector }) => {
+    return this.pageOperation(() => this.page.evaluate(({ rowSelector, listSelector, activeSelector }) => {
       const isVisible = (element) => {
         if (!element) return false;
         const style = window.getComputedStyle(element);
@@ -311,13 +423,6 @@ export class PlaywrightLinkedInAdapter {
       const visibleLists = [...document.querySelectorAll(listSelector)].filter(isVisible);
       const visibleList = visibleLists.length === 1 ? visibleLists[0] : null;
       const rows = visibleList ? [...visibleList.querySelectorAll(rowSelector)] : [];
-      const activeSelector = [
-        '.active',
-        '.msg-conversation-listitem--active',
-        '.msg-conversation-card__convo-item-container--active',
-        '[aria-current="true"]',
-        '[aria-selected="true"]',
-      ].join(',');
       const activeRowCount = rows.filter((row) => (
         row.matches(activeSelector) || row.querySelector(activeSelector)
       )).length;
@@ -336,7 +441,7 @@ export class PlaywrightLinkedInAdapter {
         activeRowCount,
         detailPaneVisible,
       };
-    }, { rowSelector: ROW_SELECTOR, listSelector: LIST_SELECTOR }));
+    }, { rowSelector: ROW_SELECTOR, listSelector: LIST_SELECTOR, activeSelector: ACTIVE_ROW_SELECTOR }));
   }
 
   async readRows({ limit = 51, excludeIds = [] } = {}) {
@@ -706,8 +811,8 @@ export class PlaywrightLinkedInAdapter {
     await this.pageOperation(() => row.click());
   }
 
-  async assertOpenedAnchorlessRow(rowId) {
-    const state = await this.pageOperation(() => this.page.evaluate((options) => {
+  async readOpenedAnchorlessRowState(rowId) {
+    return this.pageOperation(() => this.page.evaluate((options) => {
       const isVisible = (element) => {
         const style = window.getComputedStyle(element);
         const rect = element.getBoundingClientRect();
@@ -731,14 +836,39 @@ export class PlaywrightLinkedInAdapter {
       activeSelector: ACTIVE_ROW_SELECTOR,
       rowIdAttributes: ROW_ID_ATTRIBUTES,
     }));
-    if (state.listCount !== 1
-      || state.activeRowIds.length !== 1
-      || state.activeRowIds[0] !== rowId.trim()) {
+  }
+
+  openedAnchorlessRowMatches(state, rowId) {
+    return state.listCount === 1
+      && state.activeRowIds.length === 1
+      && state.activeRowIds[0] === rowId.trim();
+  }
+
+  async assertOpenedAnchorlessRow(rowId) {
+    const state = await this.readOpenedAnchorlessRowState(rowId);
+    if (state.listCount !== 1) {
+      throw new ScanInvariantError('conversation-open-list-not-uniquely-visible');
+    }
+    if (state.activeRowIds.length === 0) {
+      throw new ScanInvariantError('conversation-open-active-row-missing');
+    }
+    if (state.activeRowIds.length !== 1) {
+      throw new ScanInvariantError('conversation-open-active-row-ambiguous');
+    }
+    if (state.activeRowIds[0] !== rowId.trim()) {
       throw new ScanInvariantError('conversation-open-row-mismatch');
     }
   }
 
-  async waitForAnchorlessThread(rowId) {
+  currentCanonicalConversationUrl() {
+    try {
+      return validateConversationUrl(this.page.url());
+    } catch {
+      return null;
+    }
+  }
+
+  async waitForAnchorlessThread(rowId, { preClickCanonical = null } = {}) {
     this.unreadUrl ||= DEFAULT_UNREAD_URL;
     await waitForManualRecovery({
       ...this.recoveryOptions,
@@ -747,35 +877,46 @@ export class PlaywrightLinkedInAdapter {
       onBlocker: this.onBlocker,
       readinessType: 'thread navigation',
       isReady: (state) => {
+        let currentCanonical;
         try {
-          validateConversationUrl(state.url);
-          return true;
+          currentCanonical = validateConversationUrl(state.url);
         } catch {
           return false;
         }
+        if (preClickCanonical !== null && currentCanonical === preClickCanonical) {
+          return state.openedRowMatches === true;
+        }
+        return true;
       },
       onBlockerCleared: async ({ remainingMs }) => {
         await this.gotoUnread(this.unreadUrl, { timeoutMs: remainingMs });
         await this.clickExactAnchorlessRow(rowId);
       },
-      readState: async () => this.pageOperation(() => this.page.evaluate(() => {
-        const isVisible = (element) => {
-          const style = window.getComputedStyle(element);
-          const rect = element.getBoundingClientRect();
-          return style.display !== 'none' && style.visibility !== 'hidden'
-            && rect.width > 0 && rect.height > 0;
+      readState: async () => {
+        const pageState = await this.pageOperation(() => this.page.evaluate(() => {
+          const isVisible = (element) => {
+            const style = window.getComputedStyle(element);
+            const rect = element.getBoundingClientRect();
+            return style.display !== 'none' && style.visibility !== 'hidden'
+              && rect.width > 0 && rect.height > 0;
+          };
+          const hasVisibleMatch = (selector) => (
+            [...document.querySelectorAll(selector)].some(isVisible)
+          );
+          let bodyText = '';
+          if (hasVisibleMatch('iframe[src*="captcha" i],[id*="captcha" i],[data-test*="captcha" i]')) {
+            bodyText = 'captcha';
+          } else if (hasVisibleMatch('form[action*="checkpoint" i],form[action*="login" i],[data-test*="challenge" i],input[name*="verification" i],input[type="password"]')) {
+            bodyText = 'security verification';
+          }
+          return { url: window.location.href, title: document.title, bodyText };
+        }));
+        const identity = await this.readOpenedAnchorlessRowState(rowId);
+        return {
+          ...pageState,
+          openedRowMatches: this.openedAnchorlessRowMatches(identity, rowId),
         };
-        const hasVisibleMatch = (selector) => (
-          [...document.querySelectorAll(selector)].some(isVisible)
-        );
-        let bodyText = '';
-        if (hasVisibleMatch('iframe[src*="captcha" i],[id*="captcha" i],[data-test*="captcha" i]')) {
-          bodyText = 'captcha';
-        } else if (hasVisibleMatch('form[action*="checkpoint" i],form[action*="login" i],[data-test*="challenge" i],input[name*="verification" i],input[type="password"]')) {
-          bodyText = 'security verification';
-        }
-        return { url: window.location.href, title: document.title, bodyText };
-      })),
+      },
     });
     const openedUrl = validateConversationUrl(this.page.url());
     await this.assertOpenedAnchorlessRow(rowId);
@@ -790,8 +931,9 @@ export class PlaywrightLinkedInAdapter {
       if (canonicalUrl) {
         await this.pageOperation(() => this.page.goto(canonicalUrl, { waitUntil: 'domcontentloaded' }));
       } else {
+        const preClickCanonical = this.currentCanonicalConversationUrl();
         await this.clickExactAnchorlessRow(rowId);
-        canonicalUrl = await this.waitForAnchorlessThread(rowId);
+        canonicalUrl = await this.waitForAnchorlessThread(rowId, { preClickCanonical });
       }
 
       if (onOpened !== undefined) {
@@ -912,6 +1054,23 @@ export class PlaywrightLinkedInAdapter {
           return { violation: 'conversation-thread-not-uniquely-visible' };
         }
         const [thread] = threadRoots;
+        const dateHeadings = [...thread.querySelectorAll([
+          '[data-reporter-date-heading]',
+          '.msg-s-message-list__time-heading',
+        ].join(','))].filter(isVisible);
+        const precedingDateHeading = (message) => {
+          let chosen = null;
+          for (const heading of dateHeadings) {
+            if (message.contains(heading)) {
+              chosen = heading;
+              continue;
+            }
+            if (heading.compareDocumentPosition(message) & Node.DOCUMENT_POSITION_FOLLOWING) {
+              chosen = heading;
+            }
+          }
+          return chosen;
+        };
         const directionOf = (message) => {
           const declared = (message.getAttribute('data-reporter-direction') || '').trim().toLowerCase();
           const inbound = declared === 'inbound'
@@ -925,10 +1084,12 @@ export class PlaywrightLinkedInAdapter {
           const outbound = declared === 'outbound'
             || message.classList.contains('msg-s-event-listitem--from-me')
             || message.classList.contains('msg-s-message-list__event--from-me')
+            || message.classList.contains('msg-s-event-with-indicator__sending-indicator')
             || Boolean(message.querySelector([
               '[data-reporter-direction="outbound"]',
               '.msg-s-event-listitem--from-me',
               '.msg-s-message-list__event--from-me',
+              '.msg-s-event-with-indicator__sending-indicator',
             ].join(',')));
           return inbound === outbound ? null : (inbound ? 'inbound' : 'outbound');
         };
@@ -1067,7 +1228,10 @@ export class PlaywrightLinkedInAdapter {
           }
           if (!content.trim()) return { violation: 'message-content-missing' };
 
-          const timestampElements = [...element.querySelectorAll('time')].filter(isVisible);
+          const timestampElements = [...element.querySelectorAll('time')].filter((time) => (
+            isVisible(time)
+            && !time.classList.contains('msg-s-message-list__time-heading')
+          ));
           if (timestampElements.length > 1) return { violation: 'message-time-ambiguous' };
           const timestamp = timestampElements[0] || null;
           const datetime = timestamp?.getAttribute('datetime')?.trim() || null;
@@ -1076,6 +1240,13 @@ export class PlaywrightLinkedInAdapter {
           const visibleTimestamp = normalizedLabel(timestamp?.innerText);
           const timestampIndex = timestamp
             ? [...document.querySelectorAll('time')].indexOf(timestamp)
+            : null;
+          const dateHeadingElement = precedingDateHeading(element);
+          const dateHeading = dateHeadingElement
+            ? normalizedLabel(
+              dateHeadingElement.innerText
+                || dateHeadingElement.getAttribute('datetime'),
+            )
             : null;
           const linkedinMessageId = [
             'data-reporter-message-id',
@@ -1093,6 +1264,7 @@ export class PlaywrightLinkedInAdapter {
             timestampAriaLabel: ariaLabel,
             visibleTimestamp,
             timestampIndex,
+            dateHeading,
           });
         }
         if (unreadBoundaryCount > 1) return { violation: 'unread-boundary-ambiguous' };
@@ -1128,6 +1300,30 @@ export class PlaywrightLinkedInAdapter {
               sentAt = classified.sentAt;
               sentAtRaw = candidate;
               break;
+            }
+          }
+        }
+
+        if (sentAt === null && message.dateHeading) {
+          const clock = message.visibleTimestamp
+            || message.timestampTitle
+            || message.timestampAriaLabel;
+          const combined = combineDateHeadingAndClock(message.dateHeading, clock);
+          if (combined) {
+            const classified = classifyExactTimestamp(combined);
+            if (classified.kind === 'invalid') {
+              throw new ScanInvariantError('message-time-invalid');
+            }
+            if (classified.kind === 'exact') {
+              sentAt = classified.sentAt;
+              sentAtRaw = combined;
+            }
+          } else {
+            const relative = combineRelativeDateHeadingAndClock(message.dateHeading, clock);
+            if (relative) {
+              sentAtRaw = relative;
+            } else if (looksLikeCalendarDate(message.dateHeading)) {
+              throw new ScanInvariantError('message-time-invalid');
             }
           }
         }
