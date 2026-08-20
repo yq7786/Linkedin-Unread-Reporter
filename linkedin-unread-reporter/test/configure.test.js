@@ -30,6 +30,52 @@ test('updateEnvText replaces selected values and preserves unrelated settings', 
   assert.equal(result.split(`${['PORTAL', 'CALL', 'SECRET'].join('_')}=`).length - 1, 1);
 });
 
+test('configurePortal stores an unwrapped chat-pasted markdown webhook URL', async () => {
+  await withTempDirectory(async (directory) => {
+    const envPath = path.join(directory, '.env');
+    const answers = [
+      '[https://portal.example.test/hooks/linkedin](https://portal.example.test/hooks/linkedin)',
+      'private-call-secret',
+    ];
+
+    await configurePortal({ envPath, askSecret: async () => answers.shift() });
+    const text = await fs.readFile(envPath, 'utf8');
+    assert.match(text, /^PORTAL_WEBHOOK_URL=https:\/\/portal\.example\.test\/hooks\/linkedin$/m);
+    assert.doesNotMatch(text, /\[https:/);
+  });
+});
+
+test('configurePortal reports a skill directory that cannot be written without leaking paths', async () => {
+  const answers = [
+    'https://portal.example.test/hooks/linkedin',
+    'private-call-secret',
+  ];
+  const permissionError = new Error('EPERM: operation not permitted, open \'/private/project/.env.tmp-1\'');
+  permissionError.code = 'EPERM';
+  const fileSystem = {
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 0x20000 },
+    open: async () => {
+      const error = new Error('ENOENT');
+      error.code = 'ENOENT';
+      throw error;
+    },
+    writeFile: async () => { throw permissionError; },
+    chmod: async () => {},
+    rename: async () => {},
+    rm: async () => {},
+  };
+
+  await assert.rejects(configurePortal({
+    envPath: '/private/project/.env',
+    askSecret: async () => answers.shift(),
+    fileSystem,
+    processId: 1,
+  }), (error) => error.message === 'The skill directory is not writable. Rerun `npm run configure` with write access to the installed skill directory.'
+    && !error.message.includes('/private/project')
+    && !error.message.includes('portal.example.test')
+    && !error.message.includes('private-call-secret'));
+});
+
 test('configurePortal atomically stores portal values and preserves unrelated env lines', async () => {
   await withTempDirectory(async (directory) => {
     const envPath = path.join(directory, '.env');

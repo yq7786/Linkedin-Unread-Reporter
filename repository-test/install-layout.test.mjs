@@ -257,6 +257,7 @@ test('skill collects portal credentials in chat and transfers them only through 
   assert.match(skill, /interactive PTY/i);
   assert.match(skill, /hidden input/i);
   assert.match(skill, /Never put either value in a shell command, command-line argument, environment assignment, patch, log, automation prompt, or task output\./);
+  assert.match(skill, /write access to the installed skill directory/);
   assert.match(skill, /Never quote, summarize, visibly validate, or repeat either value/i);
   assert.match(skill, /operating agent may read/i);
   assert.doesNotMatch(skill, /must never be read or summarized by Codex/);

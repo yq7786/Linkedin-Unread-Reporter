@@ -99,6 +99,7 @@ const CONFIG_ERROR_MESSAGES = new Set([
 ]);
 const STATIC_INTERNAL_MESSAGES = new Set([
   'Configuration requires an interactive terminal. Run `npm run configure` manually.',
+  'The skill directory is not writable. Rerun `npm run configure` with write access to the installed skill directory.',
   'Environment file could not be read securely.',
   'LinkedIn unread reporter is already running.',
   'Outbox lock failed.',

@@ -56,7 +56,7 @@ PORTAL_WEBHOOK_URL: <https-url>
 PORTAL_CALL_SECRET: <secret>
 ```
 
-It transfers those values to the configurator through hidden PTY input, prepares the persistent LinkedIn login, runs the supervised dry scan, and asks for approval before the first `npm run deliver`. It creates the three fixed schedules only when count-only evidence shows both `capturedMessages > 0` and `Created + Duplicates + Assumed duplicates > 0`; otherwise, it must defer all schedules and tell the user to rerun setup after unread messages exist. The supplied values remain in that teammate's Codex chat history but are never repeated, logged, or embedded in an automation prompt.
+It transfers those values to the configurator through hidden PTY input with write access to the installed skill directory, prepares the persistent LinkedIn login, runs the supervised dry scan, and asks for approval before the first `npm run deliver`. It creates the three fixed schedules only when count-only evidence shows both `capturedMessages > 0` and `Created + Duplicates + Assumed duplicates > 0`; otherwise, it must defer all schedules and tell the user to rerun setup after unread messages exist. The supplied values remain in that teammate's Codex chat history but are never repeated, logged, or embedded in an automation prompt.
 
 If direct download fails because the local Python trust store cannot validate GitHub's certificate chain, retry the same named path with the installer's supported `--method git` option. Never disable TLS verification or use an unverified download.
 

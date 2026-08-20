@@ -4,6 +4,12 @@ import path from 'node:path';
 import { loadConfig, PROJECT_ROOT } from './config.js';
 import { readPrivateFile } from './private-file.js';
 
+const SKILL_DIRECTORY_NOT_WRITABLE = 'The skill directory is not writable. Rerun `npm run configure` with write access to the installed skill directory.';
+
+function isPermissionDenied(error) {
+  return error?.code === 'EPERM' || error?.code === 'EACCES';
+}
+
 export function updateEnvText(existingText, values) {
   const pending = new Map(Object.entries(values));
   const output = [];
@@ -82,15 +88,20 @@ async function writePrivateEnv({ envPath, values, fileSystem, processId }) {
   const updatedText = updateEnvText(existingText, values);
   const temporaryPath = `${envPath}.tmp-${processId}`;
   try {
-    await fileSystem.writeFile(temporaryPath, updatedText, {
-      encoding: 'utf8',
-      mode: 0o600,
-      flag: 'wx',
-    });
-    await fileSystem.chmod(temporaryPath, 0o600);
-    await fileSystem.rename(temporaryPath, envPath);
-  } finally {
-    await fileSystem.rm(temporaryPath, { force: true });
+    try {
+      await fileSystem.writeFile(temporaryPath, updatedText, {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      });
+      await fileSystem.chmod(temporaryPath, 0o600);
+      await fileSystem.rename(temporaryPath, envPath);
+    } finally {
+      await fileSystem.rm(temporaryPath, { force: true });
+    }
+  } catch (error) {
+    if (isPermissionDenied(error)) throw new Error(SKILL_DIRECTORY_NOT_WRITABLE);
+    throw error;
   }
 }
 
@@ -102,7 +113,7 @@ export async function configurePortal({
 } = {}) {
   const portalWebhookUrl = await askSecret('Portal Webhook URL (input hidden): ');
   const portalCallSecret = await askSecret('PORTAL_CALL_SECRET (input hidden): ');
-  loadConfig({
+  const config = loadConfig({
     env: {
       PORTAL_WEBHOOK_URL: portalWebhookUrl,
       PORTAL_CALL_SECRET: portalCallSecret,
@@ -114,8 +125,8 @@ export async function configurePortal({
   await writePrivateEnv({
     envPath,
     values: {
-      PORTAL_WEBHOOK_URL: portalWebhookUrl,
-      PORTAL_CALL_SECRET: portalCallSecret,
+      PORTAL_WEBHOOK_URL: config.portalWebhookUrl,
+      PORTAL_CALL_SECRET: config.portalCallSecret,
     },
     fileSystem,
     processId,

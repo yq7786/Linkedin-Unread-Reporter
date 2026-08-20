@@ -70,14 +70,25 @@ function parseBoundedInteger(value, fallback, name, { min, max }) {
   return parsed;
 }
 
+function unwrapPastedHttpsUrl(value) {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  const angled = /^<([^>]+)>$/.exec(trimmed);
+  if (angled) return angled[1].trim();
+  const markdown = /^\[(?:[^\]]*)\]\((https:[^)\s]+)\)$/i.exec(trimmed);
+  if (markdown) return markdown[1].trim();
+  return value;
+}
+
 export function validatePortalUrl(value) {
   if (!value) return null;
   try {
-    if (typeof value !== 'string'
-      || /[\p{C}\p{Z}\s'"]/u.test(value)) {
+    const unwrapped = unwrapPastedHttpsUrl(value);
+    if (typeof unwrapped !== 'string'
+      || /[\p{C}\p{Z}\s'"]/u.test(unwrapped)) {
       throw new Error('invalid');
     }
-    const url = new URL(value);
+    const url = new URL(unwrapped);
     if (url.protocol !== 'https:'
       || url.username
       || url.password) {

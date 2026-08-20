@@ -253,6 +253,24 @@ test('redactSecrets deduplicates overlapping secrets and redacts longest first',
   );
 });
 
+test('loadConfig unwraps chat-pasted markdown and angle-bracket portal URLs', () => {
+  const expected = 'https://portal.example.test/hooks/linkedin';
+  for (const portalWebhookUrl of [
+    `<${expected}>`,
+    `[${expected}](${expected})`,
+    `[Portal webhook](${expected})`,
+    ` [${expected}](${expected})`,
+  ]) {
+    const config = loadConfig({
+      env: { PORTAL_WEBHOOK_URL: portalWebhookUrl, PORTAL_CALL_SECRET: validCallSecret },
+      projectRoot: '/tmp/reporter',
+      requirePortal: true,
+    });
+    assert.equal(config.portalWebhookUrl, expected);
+    assert.equal(config.portalWebhookUrl.includes('['), false);
+  }
+});
+
 test('loadConfig requires an HTTPS portal URL and call secret for delivery', () => {
   const config = loadConfig({
     env: {
