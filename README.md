@@ -62,14 +62,14 @@ If direct download fails because the local Python trust store cannot validate Gi
 
 ## Default schedule
 
-Create the three weekday schedules—7:00am, 12:00pm, and 4:00pm—in `Australia/Adelaide` only after count-only setup evidence shows `capturedMessages > 0` and a nonempty Portal acknowledgement total of `Created + Duplicates + Assumed duplicates > 0`. Otherwise, defer schedule creation and rerun setup after unread messages exist. Each task explicitly uses `gpt-5.6-sol` with medium reasoning, allocates a persistent PTY for `npm run report`, and dispatches at most one timestamp-only subagent for each of attempts 1–3 when the reporter requests normalization. Scheduled runs are local, require the Mac to be available, and are not backfilled after missed execution.
+Create the three weekday schedules—7:00am, 12:00pm, and 4:00pm—in `Australia/Adelaide` only after count-only setup evidence shows `capturedMessages > 0` and a nonempty Portal acknowledgement total of `Created + Duplicates + Assumed duplicates > 0`. Otherwise, defer schedule creation and rerun setup after unread messages exist. Each task explicitly uses `gpt-5.6-sol` with medium reasoning, allocates a persistent PTY for `npm run report`, and has the same operating agent convert leftover relative labels when the reporter requests normalization. Scheduled runs are local, require the Mac to be available, and are not backfilled after missed execution.
 
 ## Privacy and security
 
 - `.env`, `.linkedin-browser-profile/`, the private outbox, timestamp sidecars, temporary files, and locks are gitignored.
 - Lock and timestamp sidecar files live in `$HOME/.linkedin-unread-reporter` so Codex sandboxes can write them even when the installed skill directory is read-only.
 - `.env`, `.linkedin-unread-outbox.json`, `.linkedin-timestamp-work.json`, and `.linkedin-timestamp-results.json` are written with mode `0600`.
-- The durable outbox supports checkpoint and recovery. Timestamp-only subagents never read it. The operating agent may read `.env`, the outbox, and timestamp sidecars when debugging.
+- The durable outbox supports checkpoint and recovery. The operating agent may read `.env`, the outbox, and timestamp sidecars when converting leftover relative labels or debugging.
 - No LinkedIn username, password, cookie, name, message content, timestamp, or thread identifier is logged.
 - Portal credentials never belong in a shell command, command-line argument, automation prompt, or task output.
 - Capture fails closed when eligibility, unread state, thread identity, unread boundary, direction, message content, or timestamp is ambiguous.

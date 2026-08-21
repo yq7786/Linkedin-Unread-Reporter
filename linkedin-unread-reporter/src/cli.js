@@ -248,15 +248,12 @@ function blockerMessage(payload) {
 }
 
 function timestampWorkMessage(payload) {
-  if (!exactPlainObject(payload, ['count', 'attempt'])
+  if (!exactPlainObject(payload, ['count'])
     || !Number.isSafeInteger(payload.count)
-    || payload.count < 0
-    || !Number.isInteger(payload.attempt)
-    || payload.attempt < 1
-    || payload.attempt > 3) {
+    || payload.count < 1) {
     throw new Error('Timestamp notification is invalid.');
   }
-  return `Timestamp normalization required: ${payload.count} item(s), attempt ${payload.attempt} of 3.`;
+  return `Timestamp normalization required: ${payload.count} item(s).`;
 }
 
 export async function performBrowserLogin(config, {

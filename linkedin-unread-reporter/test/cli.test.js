@@ -140,15 +140,16 @@ test('scheduled-report runs the complete workflow and prints counts only', async
   for (const value of privateValues) assert.doesNotMatch(stdout.join('\n'), new RegExp(value));
 });
 
-test('timestamp work notifications expose counts and attempts only', async () => {
+test('timestamp work notifications expose leftover counts only', async () => {
   const { dependencies, stdout } = harness({
     workflowImpl: async ({ notifyTimestampWork }) => {
-      notifyTimestampWork({ count: 4, attempt: 2 });
+      notifyTimestampWork({ count: 4 });
       return emptyCounts();
     },
   });
   assert.equal(await runCli(['scheduled-report'], dependencies), 0);
-  assert.match(stdout.join('\n'), /Timestamp normalization required: 4 item\(s\), attempt 2 of 3\./);
+  assert.match(stdout.join('\n'), /Timestamp normalization required: 4 item\(s\)\./);
+  assert.doesNotMatch(stdout.join('\n'), /attempt/i);
 });
 
 test('unexpected errors never expose arbitrary multi-word, JSON-shaped, or unlabeled content', async () => {
@@ -338,15 +339,14 @@ test('blocker callback accepts only an exact plain object and allowlisted blocke
   }
 });
 
-test('timestamp notification accepts only exact validated count and attempt fields', async () => {
+test('timestamp notification accepts only an exact validated leftover count', async () => {
   const invalidPayloads = [
     undefined,
-    { count: 1 },
-    { count: '1', attempt: 1 },
-    { count: 1, attempt: 0 },
-    { count: 1, attempt: 4 },
-    { count: 1, attempt: 1, content: 'Ada Private Person' },
-    { count: 1, attempt: '{"content":"private JSON"}' },
+    { count: '1' },
+    { count: 1, attempt: 1 },
+    { count: 0 },
+    { count: 1, content: 'Ada Private Person' },
+    { count: 1, extra: true },
   ];
   for (const payload of invalidPayloads) {
     const { dependencies, stdout, stderr } = harness({

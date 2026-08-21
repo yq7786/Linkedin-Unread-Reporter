@@ -77,9 +77,8 @@ function dependencies(overrides = {}) {
         pendingTimestamps: 0,
       }),
       writeWork: async () => {},
-      waitForResults: async ({ workId: expectedWorkId }) => ({
-        version: 1, workId: expectedWorkId, items: [],
-      }),
+      readWork: async () => null,
+      readResults: async () => null,
       removeSidecars: async () => {},
       removeResult: async () => {},
       generateTimestampWorkId: () => workId,
@@ -140,75 +139,52 @@ test('workflow stops before browser capture when initial delivery fails', async 
   assert.equal(saved.length, 0);
 });
 
-test('workflow retries invalid timestamp results three times, cleans sidecars, then saves fallback', async () => {
-  const pending = {
-    entryId: 'private-entry',
-    state: 'timestamp_pending',
-    leadName: 'Private Lead',
-    conversationUrl: 'https://www.linkedin.com/messaging/thread/private-thread/',
-    linkedinMessageId: null,
-    contentType: 'text',
-    content: 'Private content',
-    sentAtRaw: '2h',
-    scanStartedAt: '2026-08-19T03:00:00.000Z',
-  };
+test('workflow converts parseable relative labels immediately without waiting', async () => {
   const events = [];
-  const notifications = [];
+  const { options, saved } = dependencies({
+    initialOutbox: { version: 1, entries: [timestampEntry()] },
+    captureNew: false,
+    writeWork: async () => events.push('write'),
+    readResults: async () => { events.push('read'); return null; },
+    notifyTimestampWork: () => events.push('notify'),
+    removeSidecars: async () => events.push('cleanup'),
+  });
+
+  const result = await runPortalWorkflow(options);
+
+  assert.deepEqual(events, ['cleanup']);
+  assert.equal(saved.some(({ entries }) => entries[0]?.state === 'ready'), true);
+  assert.equal(saved.find(({ entries }) => entries[0]?.state === 'ready').entries[0].sentAt, '2026-08-19T01:00:00.000Z');
+  assert.equal(result.pendingTimestamps, 0);
+});
+
+test('workflow applies an operating-agent result sidecar without polling', async () => {
+  const events = [];
+  const pending = {
+    ...timestampEntry(),
+    sentAtRaw: 'last Tuesday',
+  };
   const { options, saved } = dependencies({
     initialOutbox: { version: 1, entries: [pending] },
     captureNew: false,
-    writeWork: async ({ work }) => events.push(`write-${work.attempt}`),
-    notifyTimestampWork: (event) => notifications.push(event),
-    waitForResults: async ({ workId: expectedWorkId }) => {
-      events.push('wait');
-      return { version: 1, workId: expectedWorkId, items: [] };
+    writeWork: async ({ work }) => events.push(`write-${work.workId}`),
+    notifyTimestampWork: (event) => events.push(`notify-${event.count}`),
+    readResults: async ({ workId: expectedWorkId }) => {
+      events.push('read');
+      return {
+        version: 1,
+        workId: expectedWorkId,
+        items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-18T01:00:00.000Z' }],
+      };
     },
     removeSidecars: async () => events.push('cleanup'),
   });
 
   const result = await runPortalWorkflow(options);
 
-  assert.deepEqual(events, [
-    'write-1', 'wait', 'cleanup',
-    'write-2', 'wait', 'cleanup',
-    'write-3', 'wait', 'cleanup',
-  ]);
-  assert.deepEqual(notifications, [
-    { count: 1, attempt: 1 },
-    { count: 1, attempt: 2 },
-    { count: 1, attempt: 3 },
-  ]);
+  assert.deepEqual(events, ['write-11111111-1111-4111-8111-111111111111', 'notify-1', 'read', 'cleanup']);
   assert.equal(saved.some(({ entries }) => entries[0]?.state === 'ready'), true);
   assert.equal(result.pendingTimestamps, 0);
-});
-
-test('workflow removes stale timestamp results before publishing every unique attempt', async () => {
-  const events = [];
-  const workIds = [
-    '11111111-1111-4111-8111-111111111111',
-    '22222222-2222-4222-8222-222222222222',
-    '33333333-3333-4333-8333-333333333333',
-  ];
-  const { options } = dependencies({
-    initialOutbox: { version: 1, entries: [timestampEntry()] },
-    captureNew: false,
-    generateTimestampWorkId: () => workIds.shift(),
-    removeResult: async () => events.push('remove-result'),
-    writeWork: async ({ work }) => events.push(`write-${work.workId}`),
-    waitForResults: async ({ workId: expectedWorkId }) => {
-      events.push('wait');
-      return { version: 1, workId: expectedWorkId, items: [] };
-    },
-    removeSidecars: async () => events.push('cleanup'),
-  });
-
-  await runPortalWorkflow(options);
-
-  assert.deepEqual(events, [
-    'remove-result', 'write-11111111-1111-4111-8111-111111111111', 'wait', 'cleanup',
-    'remove-result', 'write-22222222-2222-4222-8222-222222222222', 'wait', 'cleanup',
-    'remove-result', 'write-33333333-3333-4333-8333-333333333333', 'wait', 'cleanup',
-  ]);
 });
 
 test('workflow preserves stale-result removal errors and cleans up before publishing', async () => {
@@ -216,7 +192,7 @@ test('workflow preserves stale-result removal errors and cleans up before publis
   let writes = 0;
   let cleanups = 0;
   const { options } = dependencies({
-    initialOutbox: { version: 1, entries: [timestampEntry()] },
+    initialOutbox: { version: 1, entries: [{ ...timestampEntry(), sentAtRaw: 'last Tuesday' }] },
     captureNew: false,
     removeResult: async () => { throw primaryError; },
     writeWork: async () => { writes += 1; },
@@ -231,7 +207,7 @@ test('workflow preserves stale-result removal errors and cleans up before publis
   assert.equal(cleanups, 1);
 });
 
-test('unsupported fallback remains durable and fails count-only before portal delivery', async () => {
+test('unsupported leftover writes work once, keeps sidecars, and fails count-only before portal delivery', async () => {
   const privateValues = ['Private Lead', 'Private content', 'last Tuesday', 'private-thread'];
   const pending = {
     entryId: 'private-entry',
@@ -244,6 +220,8 @@ test('unsupported fallback remains durable and fails count-only before portal de
     sentAtRaw: privateValues[2],
     scanStartedAt: '2026-08-19T03:00:00.000Z',
   };
+  const events = [];
+  const notifications = [];
   let deliveries = 0;
   const { options, saved } = dependencies({
     initialOutbox: { version: 1, entries: [pending] },
@@ -252,7 +230,10 @@ test('unsupported fallback remains durable and fails count-only before portal de
       deliveries += 1;
       return emptyDelivery(outbox);
     },
-    waitForResults: async () => { throw new Error('Timestamp result polling timed out.'); },
+    writeWork: async ({ work }) => events.push(`write-${work.attempt}`),
+    notifyTimestampWork: (event) => notifications.push(event),
+    readResults: async () => { events.push('read'); return null; },
+    removeSidecars: async () => events.push('cleanup'),
   });
 
   await assert.rejects(runPortalWorkflow(options), (error) => {
@@ -261,6 +242,8 @@ test('unsupported fallback remains durable and fails count-only before portal de
     return true;
   });
   assert.equal(deliveries, 0);
+  assert.deepEqual(events, ['write-1', 'read']);
+  assert.deepEqual(notifications, [{ count: 1 }]);
   assert.equal(saved.length, 0);
 });
 
@@ -344,22 +327,15 @@ test('workflow runs delivery, recovery, existing timestamps, discovery, new time
         truncated: false,
       };
     },
-    writeWork: async ({ work }) => events.push(`work-${work.items.length}`),
-    waitForResults: async ({ workId: expectedWorkId }) => {
-      events.push('timestamps');
-      return {
-        version: 1,
-        workId: expectedWorkId,
-        items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-      };
-    },
+    writeWork: async () => events.push('write'),
+    readResults: async () => { events.push('read'); return null; },
     removeSidecars: async () => events.push('cleanup'),
   });
 
   const result = await runPortalWorkflow(options);
 
   assert.deepEqual(events, [
-    'deliver', 'recover', 'work-1', 'timestamps', 'cleanup', 'discover', 'deliver',
+    'deliver', 'recover', 'cleanup', 'discover', 'deliver',
   ]);
   assert.equal(saved.length, 3);
   assert.deepEqual(result, {
@@ -418,11 +394,6 @@ test('workflow saves a valid timestamp transition before sidecar cleanup failure
       events.push('save');
       saved.push(structuredClone(value));
     },
-    waitForResults: async ({ workId: expectedWorkId }) => ({
-      version: 1,
-      workId: expectedWorkId,
-      items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-    }),
     removeSidecars: async () => {
       events.push('cleanup');
       throw cleanupError;
@@ -434,40 +405,20 @@ test('workflow saves a valid timestamp transition before sidecar cleanup failure
   assert.equal(saved[0].entries[0].state, 'ready');
 });
 
-test('workflow preserves the primary timestamp error when sidecar cleanup also fails', async () => {
-  const primaryError = new Error('Timestamp result polling timed out.');
-  const cleanupError = new Error('Timestamp sidecar cleanup failed.');
-  const { options } = dependencies({
-    initialOutbox: { version: 1, entries: [timestampEntry()] },
-    captureNew: false,
-    waitForResults: async () => { throw primaryError; },
-    removeSidecars: async () => { throw cleanupError; },
-  });
-
-  await assert.rejects(runPortalWorkflow(options), (error) => error === primaryError);
-});
-
 test('workflow does not retry a failed timestamp transition save', async () => {
   const saveError = new Error('Outbox save failed.');
-  let waits = 0;
+  let reads = 0;
   let cleanups = 0;
   const { options } = dependencies({
     initialOutbox: { version: 1, entries: [timestampEntry()] },
     captureNew: false,
     save: async () => { throw saveError; },
-    waitForResults: async ({ workId: expectedWorkId }) => {
-      waits += 1;
-      return {
-        version: 1,
-        workId: expectedWorkId,
-        items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-      };
-    },
+    readResults: async () => { reads += 1; return null; },
     removeSidecars: async () => { cleanups += 1; },
   });
 
   await assert.rejects(runPortalWorkflow(options), (error) => error === saveError);
-  assert.equal(waits, 1);
+  assert.equal(reads, 0);
   assert.equal(cleanups, 1);
 });
 
@@ -511,39 +462,54 @@ test('workflow checks cancellation after now before deriving timestamp state', a
   assert.equal(derived, false);
 });
 
-test('workflow removes timestamp sidecars after a failed wait without requiring a held lock', async () => {
-  let cleanups = 0;
-  let lockHeldDuringWait = false;
-  let held = false;
-  const { options } = dependencies({
-    initialOutbox: { version: 1, entries: [timestampEntry()] },
+test('workflow applies a previous-run operating-agent result before rewriting leftover work', async () => {
+  const events = [];
+  const pending = {
+    ...timestampEntry(),
+    sentAtRaw: 'last Tuesday',
+  };
+  const { options, saved } = dependencies({
+    initialOutbox: { version: 1, entries: [pending] },
     captureNew: false,
-    withLock: async ({ task }) => {
-      held = true;
-      try {
-        return await task({ signal: new AbortController().signal });
-      } finally {
-        held = false;
-      }
+    readWork: async () => ({
+      version: 1,
+      attempt: 1,
+      workId,
+      items: [{
+        itemKey: 'timestamp-1',
+        relativeTime: 'last Tuesday',
+        scanStartedAt: '2026-08-19T03:00:00.000Z',
+      }],
+    }),
+    readResults: async ({ workId: expectedWorkId }) => {
+      events.push(`read-${expectedWorkId}`);
+      return {
+        version: 1,
+        workId: expectedWorkId,
+        items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-18T01:00:00.000Z' }],
+      };
     },
-    waitForResults: async () => {
-      lockHeldDuringWait = held;
-      throw new Error('Timestamp result polling timed out.');
-    },
-    removeSidecars: async () => { cleanups += 1; },
+    writeWork: async () => events.push('write'),
+    notifyTimestampWork: () => events.push('notify'),
+    removeSidecars: async () => events.push('cleanup'),
   });
 
   const result = await runPortalWorkflow(options);
-  assert.equal(lockHeldDuringWait, false);
-  assert.equal(cleanups >= 1, true);
+
+  assert.deepEqual(events, [`read-${workId}`, 'cleanup']);
+  assert.equal(saved.some(({ entries }) => entries[0]?.state === 'ready'), true);
   assert.equal(result.pendingTimestamps, 0);
 });
 
-test('workflow releases the outbox lock while waiting for timestamp results', async () => {
+test('workflow keeps leftover timestamp conversion on the locked path', async () => {
   const events = [];
   let held = false;
+  const pending = {
+    ...timestampEntry(),
+    sentAtRaw: 'last Tuesday',
+  };
   const { options } = dependencies({
-    initialOutbox: { version: 1, entries: [timestampEntry()] },
+    initialOutbox: { version: 1, entries: [pending] },
     captureNew: false,
     withLock: async ({ task }) => {
       events.push('lock-enter');
@@ -555,23 +521,18 @@ test('workflow releases the outbox lock while waiting for timestamp results', as
         events.push('lock-exit');
       }
     },
-    writeWork: async ({ work }) => events.push(`write-${work.attempt}`),
-    waitForResults: async ({ workId: expectedWorkId }) => {
-      events.push(held ? 'wait-locked' : 'wait-unlocked');
-      return {
-        version: 1,
-        workId: expectedWorkId,
-        items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
-      };
+    writeWork: async () => events.push(held ? 'write-locked' : 'write-unlocked'),
+    readResults: async () => {
+      events.push(held ? 'read-locked' : 'read-unlocked');
+      return null;
     },
-    removeSidecars: async () => events.push('cleanup'),
+    notifyTimestampWork: () => events.push(held ? 'notify-locked' : 'notify-unlocked'),
   });
 
-  const result = await runPortalWorkflow(options);
-  assert.equal(result.pendingTimestamps, 0);
-  assert.equal(events.includes('wait-unlocked'), true);
-  assert.equal(events.includes('wait-locked'), false);
-  const waitIndex = events.indexOf('wait-unlocked');
-  assert.equal(events[waitIndex - 1], 'lock-exit');
-  assert.equal(events[waitIndex + 1], 'lock-enter');
+  await assert.rejects(runPortalWorkflow(options), /1 timestamp item/);
+  assert.equal(events.includes('write-locked'), true);
+  assert.equal(events.includes('read-locked'), true);
+  assert.equal(events.includes('notify-locked'), true);
+  assert.equal(events.includes('write-unlocked'), false);
+  assert.equal(events.includes('read-unlocked'), false);
 });

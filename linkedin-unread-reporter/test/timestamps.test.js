@@ -10,6 +10,8 @@ import {
   applyTimestampResults,
   buildTimestampWork,
   convertRelativeTime,
+  readTimestampResult,
+  readTimestampWork,
   removeTimestampSidecars,
   waitForTimestampResults,
   writeTimestampWork,
@@ -288,6 +290,30 @@ test('applyLocalTimestampFallback rejects colliding fallback keys without partia
     (error) => /invalid/i.test(error.message) && !/Ada|Different|entry-/.test(error.message),
   );
   assert.deepEqual(collidingOutbox, original);
+});
+
+test('readTimestampWork and readTimestampResult return null when sidecars are absent', async () => {
+  await withTempDirectory(async (directory) => {
+    assert.equal(await readTimestampWork({ workPath: path.join(directory, 'work.json') }), null);
+    assert.equal(await readTimestampResult({
+      resultPath: path.join(directory, 'result.json'),
+      workId,
+    }), null);
+  });
+});
+
+test('readTimestampWork and readTimestampResult load a matching private sidecar once', async () => {
+  await withTempDirectory(async (directory) => {
+    const workPath = path.join(directory, 'work.json');
+    const resultPath = path.join(directory, 'result.json');
+    const work = buildTimestampWork(outbox, { attempt: 1, generateWorkId: () => workId });
+    const result = timestampResult([{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }]);
+    await writeTimestampWork({ workPath, work });
+    await fs.writeFile(resultPath, `${JSON.stringify(result)}\n`, { mode: 0o600 });
+
+    assert.deepEqual(await readTimestampWork({ workPath }), work);
+    assert.deepEqual(await readTimestampResult({ resultPath, workId }), result);
+  });
 });
 
 test('writeTimestampWork atomically writes a durable private sidecar', async () => {

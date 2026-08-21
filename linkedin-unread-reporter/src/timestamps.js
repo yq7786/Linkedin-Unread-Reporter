@@ -58,6 +58,93 @@ export async function removeTimestampResult({ resultPath, fileSystem = fs }) {
   await fileSystem.rm(resultPath, { force: true });
 }
 
+async function readPrivateTimestampSidecar({
+  targetPath,
+  fileSystem,
+  signal,
+  validate,
+  readFailedMessage,
+}) {
+  if (typeof targetPath !== 'string' || !targetPath) invalid();
+  let resultHandle;
+  let openError;
+  try {
+    resultHandle = await fileSystem.open(
+      targetPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    openError = error;
+  }
+  if (signal?.aborted && resultHandle) {
+    await closeResultHandle({ resultHandle, signal });
+  }
+  checkpoint(signal);
+  if (openError) {
+    if (openError?.code !== 'ENOENT') throw new Error(readFailedMessage);
+    return null;
+  }
+
+  let result;
+  let primaryError;
+  try {
+    const openedStat = await checkedAwait(signal, () => resultHandle.stat());
+    if (!openedStat.isFile() || (openedStat.mode & 0o777) !== 0o600) {
+      throw new Error('Timestamp result permissions are invalid.');
+    }
+    const text = await checkedAwait(signal, () => resultHandle.readFile('utf8'));
+    const pathStat = await checkedAwait(signal, () => fileSystem.lstat(targetPath));
+    if (!pathStat.isFile()
+      || pathStat.dev !== openedStat.dev
+      || pathStat.ino !== openedStat.ino) invalid();
+    try {
+      result = JSON.parse(text);
+    } catch {
+      invalid();
+    }
+    validate(result);
+  } catch (error) {
+    primaryError = signal?.aborted ? signal.reason : [
+      'Timestamp data is invalid.',
+      'Timestamp result permissions are invalid.',
+    ].includes(error?.message)
+      ? error
+      : new Error(readFailedMessage);
+  }
+  await closeResultHandle({ resultHandle, signal, primaryError });
+  return result;
+}
+
+export async function readTimestampWork({
+  workPath,
+  fileSystem = fs,
+  signal,
+}) {
+  return readPrivateTimestampSidecar({
+    targetPath: workPath,
+    fileSystem,
+    signal,
+    validate: (value) => validateTimestampWork(value),
+    readFailedMessage: 'Timestamp work read failed.',
+  });
+}
+
+export async function readTimestampResult({
+  resultPath,
+  workId,
+  fileSystem = fs,
+  signal,
+}) {
+  if (!isWorkId(workId)) invalid();
+  return readPrivateTimestampSidecar({
+    targetPath: resultPath,
+    fileSystem,
+    signal,
+    validate: (value) => validateTimestampResult(value, workId),
+    readFailedMessage: 'Timestamp result read failed.',
+  });
+}
+
 export async function waitForTimestampResults({
   resultPath,
   workId,
@@ -66,64 +153,20 @@ export async function waitForTimestampResults({
   fileSystem = fs,
   signal,
 }) {
-  if (typeof resultPath !== 'string'
-    || !resultPath
-    || !isWorkId(workId)
-    || !Number.isFinite(timeoutMs)
+  if (!Number.isFinite(timeoutMs)
     || timeoutMs < 0
     || !Number.isFinite(pollIntervalMs)
     || pollIntervalMs <= 0) invalid();
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     checkpoint(signal);
-    let resultHandle;
-    let openError;
-    try {
-      resultHandle = await fileSystem.open(
-        resultPath,
-        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-      );
-    } catch (error) {
-      openError = error;
-    }
-    if (signal?.aborted && resultHandle) {
-      await closeResultHandle({ resultHandle, signal });
-    }
-    checkpoint(signal);
-    if (openError) {
-      if (openError?.code !== 'ENOENT') throw new Error('Timestamp result read failed.');
-    }
-
-    if (resultHandle) {
-      let result;
-      let primaryError;
-      try {
-        const openedStat = await checkedAwait(signal, () => resultHandle.stat());
-        if (!openedStat.isFile() || (openedStat.mode & 0o777) !== 0o600) {
-          throw new Error('Timestamp result permissions are invalid.');
-        }
-        const text = await checkedAwait(signal, () => resultHandle.readFile('utf8'));
-        const pathStat = await checkedAwait(signal, () => fileSystem.lstat(resultPath));
-        if (!pathStat.isFile()
-          || pathStat.dev !== openedStat.dev
-          || pathStat.ino !== openedStat.ino) invalid();
-        try {
-          result = JSON.parse(text);
-        } catch {
-          invalid();
-        }
-        validateTimestampResult(result, workId);
-      } catch (error) {
-        primaryError = signal?.aborted ? signal.reason : [
-          'Timestamp data is invalid.',
-          'Timestamp result permissions are invalid.',
-        ].includes(error?.message)
-          ? error
-          : new Error('Timestamp result read failed.');
-      }
-      await closeResultHandle({ resultHandle, signal, primaryError });
-      return result;
-    }
+    const result = await readTimestampResult({
+      resultPath,
+      workId,
+      fileSystem,
+      signal,
+    });
+    if (result) return result;
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error('Timestamp result polling timed out.');
     await checkedAwait(signal, () => abortableDelay(

@@ -96,7 +96,7 @@ async function withFixtureBrowser(callback) {
 
 function timestampNotifier(config, logs) {
   return ({ count, attempt }) => {
-    logs.push(`Timestamp normalization required: ${count} item(s), attempt ${attempt} of 3.`);
+    logs.push(`Timestamp normalization required: ${count} item(s).`);
     const work = JSON.parse(fsSync.readFileSync(config.timestampWorkPath, 'utf8'));
     const temporaryPath = `${config.timestampResultPath}.fixture-tmp`;
     const result = {
@@ -246,7 +246,7 @@ test('full workflow captures, checkpoints, normalizes, deduplicates, and clears 
     assert.equal((await fs.stat(config.outboxPath)).mode & 0o777, 0o600);
     assert.deepEqual(await fs.readdir(directory), ['outbox.json']);
     assert.deepEqual(stdout, [
-      'Timestamp normalization required: 1 item(s), attempt 1 of 3.',
+      'Timestamp normalization required: 1 item(s).',
       'Processed: 2 conversations; Captured: 3 messages; Created: 2; Duplicates: 1; '
         + 'Assumed duplicates: 0; Pending recovery: 0; Pending timestamps: 0',
     ]);

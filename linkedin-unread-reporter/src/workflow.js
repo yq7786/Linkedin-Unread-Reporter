@@ -6,13 +6,12 @@ import {
   applyLocalTimestampFallback,
   applyTimestampResults,
   buildTimestampWork,
+  readTimestampResult,
+  readTimestampWork,
   removeTimestampResult,
   removeTimestampSidecars,
-  waitForTimestampResults,
   writeTimestampWork,
 } from './timestamps.js';
-
-const MAX_TIMESTAMP_ATTEMPTS = 3;
 const DELIVERY_COUNT_FIELDS = ['created', 'duplicate', 'assumedDuplicate'];
 const CAPTURE_COUNT_FIELDS = [
   'processedConversations', 'capturedMessages', 'pendingRecovery', 'pendingTimestamps',
@@ -137,7 +136,8 @@ export async function runPortalWorkflow({
   capture,
   fetchImpl = globalThis.fetch,
   writeWork = writeTimestampWork,
-  waitForResults = waitForTimestampResults,
+  readWork = readTimestampWork,
+  readResults = readTimestampResult,
   removeSidecars = removeTimestampSidecars,
   removeResult = removeTimestampResult,
   notifyTimestampWork = () => {},
@@ -187,10 +187,6 @@ export async function runPortalWorkflow({
 
   const cleanupSidecarsPreserving = async (signal, primaryError) => {
     await cleanupPreservingPrimary(signal, primaryError, () => removeSidecars(sidecarPaths()));
-  };
-
-  const cleanupSidecarsUnlocked = async () => {
-    await removeSidecars(sidecarPaths());
   };
 
   const initialize = async (signal) => {
@@ -280,7 +276,7 @@ export async function runPortalWorkflow({
         workPath: config.timestampWorkPath,
         work: structuredClone(work),
       }));
-      checkedCall(signal, () => notifyTimestampWork({ count, attempt }));
+      checkedCall(signal, () => notifyTimestampWork({ count }));
     } catch (error) {
       await cleanupSidecarsPreserving(signal, error);
       throw error;
@@ -298,57 +294,67 @@ export async function runPortalWorkflow({
     await cleanupSidecarsPreserving(signal, undefined);
   };
 
-  const normalizePendingTimestamps = async () => {
-    if (pendingCount(outbox, 'timestamp_pending') === 0) return;
-
-    for (let attempt = 1; attempt <= MAX_TIMESTAMP_ATTEMPTS; attempt += 1) {
-      const work = await runLocked(async ({ signal }) => {
-        await refreshOutbox(signal);
-        return publishTimestampWork(signal, attempt);
-      });
-      if (!work) return;
-
-      let result;
-      try {
-        result = await waitForResults({
-          resultPath: config.timestampResultPath,
-          workId: work.workId,
-          timeoutMs: config.authTimeoutMs,
-        });
-      } catch (error) {
-        try {
-          await cleanupSidecarsUnlocked();
-        } catch {
-          throw error;
-        }
-        continue;
+  const tryApplyPublishedResults = async (signal, work) => {
+    if (!work) return false;
+    let result;
+    try {
+      result = await checkedAwait(signal, () => readResults({
+        resultPath: config.timestampResultPath,
+        workId: work.workId,
+      }));
+    } catch (error) {
+      if (error?.message === 'Timestamp data is invalid.') {
+        await cleanupSidecarsPreserving(signal, undefined);
+        return false;
       }
-
-      try {
-        await runLocked(async ({ signal }) => {
-          await refreshOutbox(signal);
-          let normalized;
-          try {
-            normalized = applyTimestampResults(outbox, result, { workId: work.workId });
-          } catch (error) {
-            await cleanupSidecarsPreserving(signal, error);
-            throw error;
-          }
-          await persistNormalizedTimestamps(signal, normalized);
-        });
-        return;
-      } catch (error) {
-        if (error?.message === 'Timestamp data is invalid.') continue;
-        throw error;
-      }
+      throw error;
     }
+    if (!result) return false;
+    let normalized;
+    try {
+      normalized = applyTimestampResults(outbox, result, { workId: work.workId });
+    } catch (error) {
+      await cleanupSidecarsPreserving(signal, error);
+      throw error;
+    }
+    await persistNormalizedTimestamps(signal, normalized);
+    return true;
+  };
 
+  const normalizePendingTimestamps = async () => {
     await runLocked(async ({ signal }) => {
       await refreshOutbox(signal);
+      if (pendingCount(outbox, 'timestamp_pending') === 0) return;
+
+      let existingWork = null;
+      try {
+        existingWork = await checkedAwait(signal, () => readWork({
+          workPath: config.timestampWorkPath,
+        }));
+      } catch (error) {
+        if (error?.message !== 'Timestamp data is invalid.') throw error;
+      }
+      await tryApplyPublishedResults(signal, existingWork);
+      if (pendingCount(outbox, 'timestamp_pending') === 0) return;
+
       const fallback = applyLocalTimestampFallback(outbox);
-      await adopt(signal, fallback);
-      const unsupported = pendingCount(outbox, 'timestamp_pending');
-      if (unsupported > 0) throw timestampPendingError(unsupported);
+      try {
+        await adopt(signal, fallback);
+      } catch (error) {
+        await cleanupSidecarsPreserving(signal, error);
+        throw error;
+      }
+      if (pendingCount(outbox, 'timestamp_pending') === 0) {
+        await cleanupSidecarsPreserving(signal, undefined);
+        return;
+      }
+
+      const work = await publishTimestampWork(signal, 1);
+      if (!work) return;
+      if (await tryApplyPublishedResults(signal, work)) {
+        if (pendingCount(outbox, 'timestamp_pending') === 0) return;
+      }
+      throw timestampPendingError(pendingCount(outbox, 'timestamp_pending'));
     });
   };
 

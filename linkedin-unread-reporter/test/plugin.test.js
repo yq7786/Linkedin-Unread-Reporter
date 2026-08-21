@@ -75,7 +75,8 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.match(skill, /Please provide `PORTAL_WEBHOOK_URL` and `PORTAL_CALL_SECRET` together/);
   assert.match(skill, /write access to the installed skill directory/);
   assert.match(skill, /\$HOME\/\.linkedin-unread-reporter/);
-  assert.match(skill, /outbox lock is not held while waiting/i);
+  assert.match(skill, /same operating agent/i);
+  assert.match(skill, /do not dispatch a subagent/i);
   assert.match(skill, /operating agent may read/i);
   assert.doesNotMatch(skill, /must never be read or summarized by Codex/);
   for (const document of [skill, readme]) {
@@ -131,19 +132,19 @@ test('skill metadata and instructions are complete and portable', async () => {
   const scheduledPrompt = extractFencedPrompt(automation, 'Automation rules');
   assert.match(scheduledPrompt, /allocate and use a persistent PTY/i);
   assert.match(scheduledPrompt, /npm run report/);
-  assert.match(scheduledPrompt, /Timestamp normalization required: N item\(s\), attempt X of 3\./);
+  assert.match(scheduledPrompt, /Timestamp normalization required: N item\(s\)\./);
   assert.match(scheduledPrompt, /monitor[^\n]+same PTY process\/session/i);
-  assert.match(scheduledPrompt, /exactly one timestamp-only subagent[^\n]+each emitted marker[^\n]+attempt/i);
-  assert.match(scheduledPrompt, /attempt 1 of 3/i);
-  assert.match(scheduledPrompt, /attempt 2 of 3/i);
-  assert.match(scheduledPrompt, /attempt 3 of 3/i);
-  assert.match(scheduledPrompt, /local fallback after attempt three/i);
+  assert.match(scheduledPrompt, /same operating agent/i);
+  assert.match(scheduledPrompt, /Do not dispatch a subagent/i);
+  assert.match(scheduledPrompt, /reruns `npm run report` once/i);
+  assert.doesNotMatch(scheduledPrompt, /attempt 1 of 3/i);
+  assert.doesNotMatch(scheduledPrompt, /timestamp-only subagent/i);
   assert.match(scheduledPrompt, /never pass names, message content, or LinkedIn URLs/i);
-  assert.match(scheduledPrompt, /never pass timestamps, credentials/i);
+  assert.match(scheduledPrompt, /never put timestamps, credentials/i);
   assert.match(scheduledPrompt, /count-only/i);
   assertNoCredentialValuesOrAbsolutePaths(scheduledPrompt);
 
-  const timestampPrompt = extractFencedPrompt(automation, 'Timestamp-only subagent protocol');
+  const timestampPrompt = extractFencedPrompt(automation, 'Operating-agent timestamp conversion');
   assert.match(timestampPrompt, /\$HOME\/\.linkedin-unread-reporter/);
   assert.match(timestampPrompt, /\.linkedin-timestamp-work\.json/);
   assert.match(timestampPrompt, /\.linkedin-timestamp-results\.json/);

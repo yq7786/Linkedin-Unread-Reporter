@@ -29,16 +29,16 @@ Keep the named IANA timezone so daylight-saving transitions remain automatic rat
 Use this credential-free task prompt exactly:
 
 ```text
-Use $linkedin-unread-reporter to run the scheduled LinkedIn unread report. Work from the skill's installed directory. Allocate and use a persistent PTY to start `npm run report`, then monitor that same PTY process/session until it exits. Whenever it prints `Timestamp normalization required: N item(s), attempt X of 3.`, dispatch exactly one timestamp-only subagent for each emitted marker and attempt, never more than one for that marker/attempt, then resume monitoring the same PTY process/session. Handle at most one subagent for each of attempt 1 of 3, attempt 2 of 3, and attempt 3 of 3; let the reporter use local fallback after attempt three. Never pass names, message content, or LinkedIn URLs; also never pass timestamps, credentials, outbox data, sidecar contents, or absolute paths between the parent and subagent or into the final task output. If the visible browser requires login, CAPTCHA, checkpoint, or identity verification, state only which manual action is required and allow up to 15 minutes. Return count-only success fields or a sanitized error.
+Use $linkedin-unread-reporter to run the scheduled LinkedIn unread report. Work from the skill's installed directory. Allocate and use a persistent PTY to start `npm run report`, then monitor that same PTY process/session until it exits. If it prints `Timestamp normalization required: N item(s).`, the same operating agent reads $HOME/.linkedin-unread-reporter/.linkedin-timestamp-work.json, converts every relativeTime to an ISO-8601 sentAt using its scanStartedAt anchor, copies the top-level workId and each itemKey verbatim, atomically writes mode-0600 .linkedin-timestamp-results.json, and reruns `npm run report` once in the same persistent PTY. Do not dispatch a subagent. Never pass names, message content, or LinkedIn URLs; also never put timestamps, credentials, outbox data, sidecar contents, or absolute paths into the final task output. If the visible browser requires login, CAPTCHA, checkpoint, or identity verification, state only which manual action is required and allow up to 15 minutes. Return count-only success fields or a sanitized error.
 ```
 
-The prompt deliberately tells the parent to allocate a persistent PTY, run `npm run report`, monitor that same PTY process/session, and respond to each marker. It contains neither secrets nor absolute paths.
+The prompt deliberately tells the parent to allocate a persistent PTY, run `npm run report`, monitor that same PTY process/session, and convert leftover relative labels itself. It contains neither secrets nor absolute paths.
 
-## Timestamp-only subagent protocol
+## Operating-agent timestamp conversion
 
-The reporter may print `Timestamp normalization required: N item(s), attempt X of 3.` after atomically writing the private `.linkedin-timestamp-work.json` sidecar in `$HOME/.linkedin-unread-reporter` and releasing the outbox lock. For each distinct attempt marker, the parent must dispatch exactly one subagent, and it must be the timestamp-only subagent below. The three possible markers correspond to attempt 1 of 3, attempt 2 of 3, and attempt 3 of 3. Do not dispatch speculatively, retry an attempt with another subagent, or dispatch more than three total.
+The reporter converts parseable relative labels in process. If any leftovers remain, it prints `Timestamp normalization required: N item(s).` after atomically writing the private `.linkedin-timestamp-work.json` sidecar in `$HOME/.linkedin-unread-reporter`, then exits without waiting. The same operating agent — not a subagent — must convert those leftovers and rerun the same command. Do not dispatch a timestamp-only subagent.
 
-Give the subagent exactly this task:
+The operating agent uses exactly this conversion task:
 
 ```text
 Work only in $HOME/.linkedin-unread-reporter. Read the private
@@ -55,7 +55,7 @@ outbox, browser profile, .env, lead names, message content, or LinkedIn URLs. Re
 only the number of converted items.
 ```
 
-The parent continues monitoring the same PTY process/session after each dispatch. It never reads either timestamp sidecar itself and never passes names, message content, or LinkedIn URLs. If a result is missing or invalid, the reporter removes the private sidecars and emits the next attempt marker. After attempt three, dispatch nothing further and let the reporter use local fallback after attempt three. Neither timestamp values nor relative labels may enter the final Codex task output.
+After writing the result sidecar, rerun the same `npm run deliver` or `npm run report` command once. The reporter applies that result and continues. Neither timestamp values nor relative labels may enter the final Codex task output.
 
 ## Verification
 
@@ -68,5 +68,5 @@ After creation, inspect all schedules and confirm:
 5. count-only setup evidence shows the dry scan captured at least one message and `Created + Duplicates + Assumed duplicates > 0` for the approved delivery;
 6. the prompt contains no credential, sensitive data, or absolute path;
 7. every task invokes `$linkedin-unread-reporter` and runs the same `npm run report` entry point in a persistent terminal session;
-8. the parent dispatches exactly one timestamp-only subagent for each emitted attempt marker, never more than attempts 1–3; and
-9. all parent, subagent, and final task responses remain count-only.
+8. the same operating agent converts leftover relative labels from the timestamp work sidecar and reruns once, without dispatching a subagent; and
+9. all parent and final task responses remain count-only.
