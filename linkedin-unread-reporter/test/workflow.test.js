@@ -511,21 +511,67 @@ test('workflow checks cancellation after now before deriving timestamp state', a
   assert.equal(derived, false);
 });
 
-test('workflow removes timestamp sidecars even when timestamp rejection compromises the lock', async () => {
-  const controller = new AbortController();
-  const compromise = new Error('Outbox lock failed.');
+test('workflow removes timestamp sidecars after a failed wait without requiring a held lock', async () => {
   let cleanups = 0;
+  let lockHeldDuringWait = false;
+  let held = false;
   const { options } = dependencies({
     initialOutbox: { version: 1, entries: [timestampEntry()] },
     captureNew: false,
-    withLock: async ({ task }) => task({ signal: controller.signal }),
+    withLock: async ({ task }) => {
+      held = true;
+      try {
+        return await task({ signal: new AbortController().signal });
+      } finally {
+        held = false;
+      }
+    },
     waitForResults: async () => {
-      controller.abort(compromise);
-      throw new Error('private timestamp failure');
+      lockHeldDuringWait = held;
+      throw new Error('Timestamp result polling timed out.');
     },
     removeSidecars: async () => { cleanups += 1; },
   });
 
-  await assert.rejects(runPortalWorkflow(options), compromise);
-  assert.equal(cleanups, 1);
+  const result = await runPortalWorkflow(options);
+  assert.equal(lockHeldDuringWait, false);
+  assert.equal(cleanups >= 1, true);
+  assert.equal(result.pendingTimestamps, 0);
+});
+
+test('workflow releases the outbox lock while waiting for timestamp results', async () => {
+  const events = [];
+  let held = false;
+  const { options } = dependencies({
+    initialOutbox: { version: 1, entries: [timestampEntry()] },
+    captureNew: false,
+    withLock: async ({ task }) => {
+      events.push('lock-enter');
+      held = true;
+      try {
+        return await task({ signal: new AbortController().signal });
+      } finally {
+        held = false;
+        events.push('lock-exit');
+      }
+    },
+    writeWork: async ({ work }) => events.push(`write-${work.attempt}`),
+    waitForResults: async ({ workId: expectedWorkId }) => {
+      events.push(held ? 'wait-locked' : 'wait-unlocked');
+      return {
+        version: 1,
+        workId: expectedWorkId,
+        items: [{ itemKey: 'timestamp-1', sentAt: '2026-08-19T01:00:00.000Z' }],
+      };
+    },
+    removeSidecars: async () => events.push('cleanup'),
+  });
+
+  const result = await runPortalWorkflow(options);
+  assert.equal(result.pendingTimestamps, 0);
+  assert.equal(events.includes('wait-unlocked'), true);
+  assert.equal(events.includes('wait-locked'), false);
+  const waitIndex = events.indexOf('wait-unlocked');
+  assert.equal(events[waitIndex - 1], 'lock-exit');
+  assert.equal(events[waitIndex + 1], 'lock-enter');
 });

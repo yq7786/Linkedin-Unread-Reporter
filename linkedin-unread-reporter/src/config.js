@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -132,10 +133,23 @@ function validateTimezone(value) {
   }
 }
 
+export function resolveStateDirectory(homeDirectory = os.homedir()) {
+  if (typeof homeDirectory !== 'string' || homeDirectory.trim() === '') {
+    throw new ConfigError('Home directory is unavailable.');
+  }
+  return path.resolve(homeDirectory, '.linkedin-unread-reporter');
+}
+
+export function ensureStateDirectory(stateDirectory, fileSystem = fs) {
+  fileSystem.mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
+  fileSystem.chmodSync(stateDirectory, 0o700);
+}
+
 export function loadConfig({
   env = readProjectEnv(),
   projectRoot = PROJECT_ROOT,
   requirePortal = true,
+  homeDirectory = os.homedir(),
 } = {}) {
   const portalWebhookUrl = validatePortalUrl(env.PORTAL_WEBHOOK_URL);
   const portalCallSecret = validatePortalCallSecret(env.PORTAL_CALL_SECRET);
@@ -148,15 +162,18 @@ export function loadConfig({
     ? profileSetting
     : path.resolve(projectRoot, profileSetting);
 
+  const stateDirectory = resolveStateDirectory(homeDirectory);
+
   return Object.freeze({
     projectRoot,
+    stateDirectory,
     portalWebhookUrl,
     portalCallSecret,
     browserProfilePath,
     outboxPath: path.resolve(projectRoot, DEFAULTS.outboxPath),
-    outboxLockPath: path.resolve(projectRoot, DEFAULTS.outboxLockPath),
-    timestampWorkPath: path.resolve(projectRoot, DEFAULTS.timestampWorkPath),
-    timestampResultPath: path.resolve(projectRoot, DEFAULTS.timestampResultPath),
+    outboxLockPath: path.join(stateDirectory, DEFAULTS.outboxLockPath),
+    timestampWorkPath: path.join(stateDirectory, DEFAULTS.timestampWorkPath),
+    timestampResultPath: path.join(stateDirectory, DEFAULTS.timestampResultPath),
     unreadUrl: validateUnreadUrl(env.LINKEDIN_UNREAD_URL || DEFAULTS.unreadUrl),
     maxUnreadConversations: parseBoundedInteger(
       env.MAX_UNREAD_CONVERSATIONS,

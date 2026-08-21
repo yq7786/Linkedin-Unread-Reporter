@@ -3,7 +3,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { LinkedInBlockerError, withPersistentBrowser } from './browser.js';
-import { ConfigError, loadConfig, PROJECT_ROOT, readProjectEnv, redactSecrets } from './config.js';
+import {
+  ConfigError, ensureStateDirectory, loadConfig, PROJECT_ROOT, readProjectEnv, redactSecrets,
+} from './config.js';
 import { configurePortal } from './configure.js';
 import { ScanInvariantError } from './linkedin-state.js';
 import { MessageDataError } from './messages.js';
@@ -332,6 +334,7 @@ function defaultDependencies(overrides) {
     stdout: (line) => console.log(line),
     stderr: (line) => console.error(line),
     loadConfigImpl: loadConfig,
+    ensureStateDirectoryImpl: ensureStateDirectory,
     readEnvImpl: readProjectEnv,
     configurePortalImpl: configurePortal,
     loginImpl: performBrowserLogin,
@@ -371,6 +374,9 @@ export async function runCli(argv, overrides = {}) {
       projectRoot: dependencies.projectRoot,
       requirePortal: !['login', 'scan'].includes(command),
     });
+    if (config.stateDirectory) {
+      dependencies.ensureStateDirectoryImpl(config.stateDirectory);
+    }
 
     const blockerOptions = {
       onBlocker: (payload) => dependencies.stderr(blockerMessage(payload)),

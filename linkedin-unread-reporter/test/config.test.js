@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import {
   ConfigError,
+  ensureStateDirectory,
   loadConfig,
   parseEnvText,
   readProjectEnv,
@@ -157,19 +158,34 @@ test('loadConfig applies safe defaults relative to the project root', () => {
       PORTAL_CALL_SECRET: validCallSecret,
     },
     projectRoot: '/tmp/reporter',
+    homeDirectory: '/tmp/reporter-home',
   });
 
   assert.equal(config.portalWebhookUrl, validPortalUrl);
   assert.equal(config.portalCallSecret, validCallSecret);
   assert.equal(config.browserProfilePath, path.resolve('/tmp/reporter', '.linkedin-browser-profile'));
   assert.equal(config.outboxPath, path.resolve('/tmp/reporter', '.linkedin-unread-outbox.json'));
-  assert.equal(config.outboxLockPath, path.resolve('/tmp/reporter', '.linkedin-unread-outbox.lock'));
-  assert.equal(config.timestampWorkPath, path.resolve('/tmp/reporter', '.linkedin-timestamp-work.json'));
-  assert.equal(config.timestampResultPath, path.resolve('/tmp/reporter', '.linkedin-timestamp-results.json'));
+  assert.equal(config.stateDirectory, path.resolve('/tmp/reporter-home', '.linkedin-unread-reporter'));
+  assert.equal(config.outboxLockPath, path.resolve('/tmp/reporter-home', '.linkedin-unread-reporter', '.linkedin-unread-outbox.lock'));
+  assert.equal(config.timestampWorkPath, path.resolve('/tmp/reporter-home', '.linkedin-unread-reporter', '.linkedin-timestamp-work.json'));
+  assert.equal(config.timestampResultPath, path.resolve('/tmp/reporter-home', '.linkedin-unread-reporter', '.linkedin-timestamp-results.json'));
   assert.equal(config.unreadUrl, 'https://www.linkedin.com/messaging/?filter=unread');
   assert.equal(config.maxUnreadConversations, 50);
   assert.equal(config.authTimeoutMs, 900_000);
   assert.equal(config.reportTimezone, 'Australia/Adelaide');
+});
+
+test('ensureStateDirectory creates a mode-0700 runtime directory', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'linkedin-state-'));
+  const stateDirectory = path.join(directory, '.linkedin-unread-reporter');
+  try {
+    ensureStateDirectory(stateDirectory);
+    const stat = fs.statSync(stateDirectory);
+    assert.equal(stat.isDirectory(), true);
+    assert.equal(stat.mode & 0o777, 0o700);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('loadConfig allows scan-only operation without portal credentials', () => {
@@ -278,12 +294,13 @@ test('loadConfig requires an HTTPS portal URL and call secret for delivery', () 
       PORTAL_CALL_SECRET: 'private-call-secret',
     },
     projectRoot: '/tmp/reporter',
+    homeDirectory: '/tmp/reporter-home',
     requirePortal: true,
   });
   assert.equal(config.portalWebhookUrl, 'https://portal.example.test/hooks/linkedin');
   assert.equal(config.portalCallSecret, 'private-call-secret');
   assert.equal(config.outboxPath, '/tmp/reporter/.linkedin-unread-outbox.json');
-  assert.equal(config.outboxLockPath, '/tmp/reporter/.linkedin-unread-outbox.lock');
+  assert.equal(config.outboxLockPath, '/tmp/reporter-home/.linkedin-unread-reporter/.linkedin-unread-outbox.lock');
 });
 
 test('loadConfig rejects HTTP portal URLs without echoing secrets', () => {

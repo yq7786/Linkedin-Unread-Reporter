@@ -148,182 +148,233 @@ export async function runPortalWorkflow({
     throw new Error('Workflow capture dependency is invalid.');
   }
 
-  return withLock({
+  let outbox = null;
+  let lastPersistedOutbox = null;
+  let scanStartedAt = null;
+  let deliveryCounts = { created: 0, duplicate: 0, assumedDuplicate: 0 };
+  let processedConversations = 0;
+  let capturedMessages = 0;
+
+  const runLocked = (task) => withLock({
     lockPath: config.outboxLockPath,
-    task: async ({ signal }) => {
-      let outbox = validatedOutbox(
-        await checkedAwait(signal, () => load({ outboxPath: config.outboxPath })),
-      );
-      let lastPersistedOutbox = structuredClone(outbox);
-      const nowValue = checkedCall(signal, now);
-      checkpoint(signal);
-      const scanStartedAt = normalizeNow(nowValue);
-      let deliveryCounts = { created: 0, duplicate: 0, assumedDuplicate: 0 };
-      let processedConversations = 0;
-      let capturedMessages = 0;
+    task,
+  });
 
-      const persist = async (value) => {
-        checkpoint(signal);
-        const validated = validatedOutbox(value);
-        if (isDeepStrictEqual(validated, lastPersistedOutbox)) return;
-        await checkedAwait(signal, () => save({
-          outboxPath: config.outboxPath,
-          value: structuredClone(validated),
+  const persist = async (signal, value) => {
+    checkpoint(signal);
+    const validated = validatedOutbox(value);
+    if (isDeepStrictEqual(validated, lastPersistedOutbox)) return;
+    await checkedAwait(signal, () => save({
+      outboxPath: config.outboxPath,
+      value: structuredClone(validated),
+    }));
+    checkpoint(signal);
+    lastPersistedOutbox = structuredClone(validated);
+  };
+
+  const adopt = async (signal, value) => {
+    checkpoint(signal);
+    const validated = validatedOutbox(value);
+    await persist(signal, validated);
+    checkpoint(signal);
+    outbox = validated;
+  };
+
+  const sidecarPaths = () => ({
+    workPath: config.timestampWorkPath,
+    resultPath: config.timestampResultPath,
+  });
+
+  const cleanupSidecarsPreserving = async (signal, primaryError) => {
+    await cleanupPreservingPrimary(signal, primaryError, () => removeSidecars(sidecarPaths()));
+  };
+
+  const cleanupSidecarsUnlocked = async () => {
+    await removeSidecars(sidecarPaths());
+  };
+
+  const initialize = async (signal) => {
+    outbox = validatedOutbox(
+      await checkedAwait(signal, () => load({ outboxPath: config.outboxPath })),
+    );
+    lastPersistedOutbox = structuredClone(outbox);
+    const nowValue = checkedCall(signal, now);
+    checkpoint(signal);
+    scanStartedAt = normalizeNow(nowValue);
+  };
+
+  const refreshOutbox = async (signal) => {
+    outbox = validatedOutbox(
+      await checkedAwait(signal, () => load({ outboxPath: config.outboxPath })),
+    );
+    lastPersistedOutbox = structuredClone(outbox);
+  };
+
+  const deliverCurrent = async (signal) => {
+    const readyCount = pendingCount(outbox, 'ready');
+    if (readyCount === 0) return;
+    checkpoint(signal);
+    const rawResult = await checkedAwait(signal, () => deliver({
+      outbox: frozenOutbox(outbox),
+      capturedAt: new Date(scanStartedAt.valueOf()),
+      postBatch: ({ messages, capturedAt }) => {
+        return checkedCall(signal, () => postPortalBatch({
+          webhookUrl: config.portalWebhookUrl,
+          callSecret: config.portalCallSecret,
+          messages: structuredClone(messages),
+          capturedAt: new Date(capturedAt.valueOf()),
+          fetchImpl,
         }));
-        checkpoint(signal);
-        lastPersistedOutbox = structuredClone(validated);
-      };
+      },
+      signal,
+    }));
+    const result = validateDeliveryResult(rawResult, readyCount);
+    await adopt(signal, result.outbox);
+    checkpoint(signal);
+    deliveryCounts = addCounts(
+      deliveryCounts,
+      result.counts,
+      DELIVERY_COUNT_FIELDS,
+    );
+  };
 
-      const adopt = async (value) => {
-        checkpoint(signal);
-        const validated = validatedOutbox(value);
-        await persist(validated);
-        checkpoint(signal);
-        outbox = validated;
-      };
+  const runCapturePhase = async (signal, { recoverPending, discoverNew }) => {
+    checkpoint(signal);
+    const rawResult = await checkedAwait(signal, () => capture({
+      outbox: frozenOutbox(outbox),
+      saveOutbox: (value) => persist(signal, value),
+      unreadUrl: config.unreadUrl,
+      scanStartedAt: new Date(scanStartedAt.valueOf()),
+      cap: config.maxUnreadConversations,
+      authTimeoutMs: config.authTimeoutMs,
+      recoverPending,
+      captureNew: discoverNew,
+      signal,
+    }));
+    const result = validateCaptureResult(rawResult);
+    await adopt(signal, result.outbox);
+    checkpoint(signal);
+    const nextProcessed = processedConversations + result.counts.processedConversations;
+    const nextCaptured = capturedMessages + result.counts.capturedMessages;
+    if (!isCount(nextProcessed) || !isCount(nextCaptured)) invalidDependency();
+    processedConversations = nextProcessed;
+    capturedMessages = nextCaptured;
+  };
 
-      const deliverCurrent = async () => {
-        const readyCount = pendingCount(outbox, 'ready');
-        if (readyCount === 0) return;
-        checkpoint(signal);
-        const rawResult = await checkedAwait(signal, () => deliver({
-          outbox: frozenOutbox(outbox),
-          capturedAt: new Date(scanStartedAt.valueOf()),
-          postBatch: ({ messages, capturedAt }) => {
-            return checkedCall(signal, () => postPortalBatch({
-              webhookUrl: config.portalWebhookUrl,
-              callSecret: config.portalCallSecret,
-              messages: structuredClone(messages),
-              capturedAt: new Date(capturedAt.valueOf()),
-              fetchImpl,
-            }));
-          },
-          signal,
-        }));
-        const result = validateDeliveryResult(rawResult, readyCount);
-        await adopt(result.outbox);
-        checkpoint(signal);
-        deliveryCounts = addCounts(
-          deliveryCounts,
-          result.counts,
-          DELIVERY_COUNT_FIELDS,
-        );
-      };
+  const publishTimestampWork = async (signal, attempt) => {
+    const count = pendingCount(outbox, 'timestamp_pending');
+    if (count === 0) return null;
+    try {
+      await checkedAwait(signal, () => removeResult({
+        resultPath: config.timestampResultPath,
+      }));
+    } catch (error) {
+      await cleanupSidecarsPreserving(signal, error);
+    }
+    const work = buildTimestampWork(outbox, {
+      attempt,
+      ...(generateTimestampWorkId ? { generateWorkId: generateTimestampWorkId } : {}),
+    });
+    try {
+      await checkedAwait(signal, () => writeWork({
+        workPath: config.timestampWorkPath,
+        work: structuredClone(work),
+      }));
+      checkedCall(signal, () => notifyTimestampWork({ count, attempt }));
+    } catch (error) {
+      await cleanupSidecarsPreserving(signal, error);
+      throw error;
+    }
+    return work;
+  };
 
-      const normalizePendingTimestamps = async () => {
-        const count = pendingCount(outbox, 'timestamp_pending');
-        if (count === 0) return;
+  const persistNormalizedTimestamps = async (signal, normalized) => {
+    try {
+      await adopt(signal, normalized);
+    } catch (error) {
+      await cleanupSidecarsPreserving(signal, error);
+      throw error;
+    }
+    await cleanupSidecarsPreserving(signal, undefined);
+  };
 
-        for (let attempt = 1; attempt <= MAX_TIMESTAMP_ATTEMPTS; attempt += 1) {
-          checkpoint(signal);
-          try {
-            await checkedAwait(signal, () => removeResult({
-              resultPath: config.timestampResultPath,
-            }));
-          } catch (error) {
-            await cleanupPreservingPrimary(signal, error, () => removeSidecars({
-              workPath: config.timestampWorkPath,
-              resultPath: config.timestampResultPath,
-            }));
-          }
-          const work = buildTimestampWork(outbox, {
-            attempt,
-            ...(generateTimestampWorkId ? { generateWorkId: generateTimestampWorkId } : {}),
-          });
-          try {
-            await checkedAwait(signal, () => writeWork({
-              workPath: config.timestampWorkPath,
-              work: structuredClone(work),
-            }));
-            checkedCall(signal, () => notifyTimestampWork({ count, attempt }));
-          } catch (error) {
-            await cleanupPreservingPrimary(signal, error, () => removeSidecars({
-              workPath: config.timestampWorkPath,
-              resultPath: config.timestampResultPath,
-            }));
-            throw error;
-          }
+  const normalizePendingTimestamps = async () => {
+    if (pendingCount(outbox, 'timestamp_pending') === 0) return;
 
+    for (let attempt = 1; attempt <= MAX_TIMESTAMP_ATTEMPTS; attempt += 1) {
+      const work = await runLocked(async ({ signal }) => {
+        await refreshOutbox(signal);
+        return publishTimestampWork(signal, attempt);
+      });
+      if (!work) return;
+
+      let result;
+      try {
+        result = await waitForResults({
+          resultPath: config.timestampResultPath,
+          workId: work.workId,
+          timeoutMs: config.authTimeoutMs,
+        });
+      } catch (error) {
+        try {
+          await cleanupSidecarsUnlocked();
+        } catch {
+          throw error;
+        }
+        continue;
+      }
+
+      try {
+        await runLocked(async ({ signal }) => {
+          await refreshOutbox(signal);
           let normalized;
           try {
-            const result = await checkedAwait(signal, () => waitForResults({
-              resultPath: config.timestampResultPath,
-              workId: work.workId,
-              timeoutMs: config.authTimeoutMs,
-              signal,
-            }));
-            checkpoint(signal);
             normalized = applyTimestampResults(outbox, result, { workId: work.workId });
-            checkpoint(signal);
           } catch (error) {
-            await cleanupPreservingPrimary(signal, error, () => removeSidecars({
-              workPath: config.timestampWorkPath,
-              resultPath: config.timestampResultPath,
-            }));
-            continue;
-          }
-
-          try {
-            await adopt(normalized);
-          } catch (error) {
-            await cleanupPreservingPrimary(signal, error, () => removeSidecars({
-              workPath: config.timestampWorkPath,
-              resultPath: config.timestampResultPath,
-            }));
+            await cleanupSidecarsPreserving(signal, error);
             throw error;
           }
-          await cleanupPreservingPrimary(signal, undefined, () => removeSidecars({
-            workPath: config.timestampWorkPath,
-            resultPath: config.timestampResultPath,
-          }));
-          return;
-        }
+          await persistNormalizedTimestamps(signal, normalized);
+        });
+        return;
+      } catch (error) {
+        if (error?.message === 'Timestamp data is invalid.') continue;
+        throw error;
+      }
+    }
 
-        checkpoint(signal);
-        const fallback = applyLocalTimestampFallback(outbox);
-        await adopt(fallback);
-        const unsupported = pendingCount(outbox, 'timestamp_pending');
-        if (unsupported > 0) throw timestampPendingError(unsupported);
-      };
+    await runLocked(async ({ signal }) => {
+      await refreshOutbox(signal);
+      const fallback = applyLocalTimestampFallback(outbox);
+      await adopt(signal, fallback);
+      const unsupported = pendingCount(outbox, 'timestamp_pending');
+      if (unsupported > 0) throw timestampPendingError(unsupported);
+    });
+  };
 
-      const runCapturePhase = async ({ recoverPending, discoverNew }) => {
-        checkpoint(signal);
-        const rawResult = await checkedAwait(signal, () => capture({
-          outbox: frozenOutbox(outbox),
-          saveOutbox: persist,
-          unreadUrl: config.unreadUrl,
-          scanStartedAt: new Date(scanStartedAt.valueOf()),
-          cap: config.maxUnreadConversations,
-          authTimeoutMs: config.authTimeoutMs,
-          recoverPending,
-          captureNew: discoverNew,
-          signal,
-        }));
-        const result = validateCaptureResult(rawResult);
-        await adopt(result.outbox);
-        checkpoint(signal);
-        const nextProcessed = processedConversations + result.counts.processedConversations;
-        const nextCaptured = capturedMessages + result.counts.capturedMessages;
-        if (!isCount(nextProcessed) || !isCount(nextCaptured)) invalidDependency();
-        processedConversations = nextProcessed;
-        capturedMessages = nextCaptured;
-      };
-
-      await deliverCurrent();
-      if (captureNew) await runCapturePhase({ recoverPending: true, discoverNew: false });
-      await normalizePendingTimestamps();
-      if (captureNew) await runCapturePhase({ recoverPending: false, discoverNew: true });
-      await normalizePendingTimestamps();
-      await deliverCurrent();
-
-      checkpoint(signal);
-      return {
-        processedConversations,
-        capturedMessages,
-        ...deliveryCounts,
-        pendingRecovery: pendingCount(outbox, 'capture_pending'),
-        pendingTimestamps: pendingCount(outbox, 'timestamp_pending'),
-      };
-    },
+  await runLocked(async ({ signal }) => {
+    await initialize(signal);
+    await deliverCurrent(signal);
+    if (captureNew) await runCapturePhase(signal, { recoverPending: true, discoverNew: false });
+  });
+  await normalizePendingTimestamps();
+  if (captureNew) {
+    await runLocked(async ({ signal }) => {
+      await refreshOutbox(signal);
+      await runCapturePhase(signal, { recoverPending: false, discoverNew: true });
+    });
+  }
+  await normalizePendingTimestamps();
+  return runLocked(async ({ signal }) => {
+    await refreshOutbox(signal);
+    await deliverCurrent(signal);
+    checkpoint(signal);
+    return {
+      processedConversations,
+      capturedMessages,
+      ...deliveryCounts,
+      pendingRecovery: pendingCount(outbox, 'capture_pending'),
+      pendingTimestamps: pendingCount(outbox, 'timestamp_pending'),
+    };
   });
 }

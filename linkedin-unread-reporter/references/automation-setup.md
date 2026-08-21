@@ -36,12 +36,12 @@ The prompt deliberately tells the parent to allocate a persistent PTY, run `npm 
 
 ## Timestamp-only subagent protocol
 
-The reporter may print `Timestamp normalization required: N item(s), attempt X of 3.` after atomically writing the private `.linkedin-timestamp-work.json` sidecar. For each distinct attempt marker, the parent must dispatch exactly one subagent, and it must be the timestamp-only subagent below. The three possible markers correspond to attempt 1 of 3, attempt 2 of 3, and attempt 3 of 3. Do not dispatch speculatively, retry an attempt with another subagent, or dispatch more than three total.
+The reporter may print `Timestamp normalization required: N item(s), attempt X of 3.` after atomically writing the private `.linkedin-timestamp-work.json` sidecar in `$HOME/.linkedin-unread-reporter` and releasing the outbox lock. For each distinct attempt marker, the parent must dispatch exactly one subagent, and it must be the timestamp-only subagent below. The three possible markers correspond to attempt 1 of 3, attempt 2 of 3, and attempt 3 of 3. Do not dispatch speculatively, retry an attempt with another subagent, or dispatch more than three total.
 
 Give the subagent exactly this task:
 
 ```text
-Work only in the installed linkedin-unread-reporter skill directory. Read the private
+Work only in $HOME/.linkedin-unread-reporter. Read the private
 .linkedin-timestamp-work.json file. It contains one opaque top-level workId; each item
 contains only itemKey, relativeTime, and scanStartedAt fields. Convert every relativeTime
 to an ISO-8601 sentAt value using its scanStartedAt anchor. Copy the top-level input workId

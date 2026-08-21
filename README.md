@@ -67,6 +67,7 @@ Create the three weekday schedules—7:00am, 12:00pm, and 4:00pm—in `Australia
 ## Privacy and security
 
 - `.env`, `.linkedin-browser-profile/`, the private outbox, timestamp sidecars, temporary files, and locks are gitignored.
+- Lock and timestamp sidecar files live in `$HOME/.linkedin-unread-reporter` so Codex sandboxes can write them even when the installed skill directory is read-only.
 - `.env`, `.linkedin-unread-outbox.json`, `.linkedin-timestamp-work.json`, and `.linkedin-timestamp-results.json` are written with mode `0600`.
 - The durable outbox supports checkpoint and recovery. Timestamp-only subagents never read it. The operating agent may read `.env`, the outbox, and timestamp sidecars when debugging.
 - No LinkedIn username, password, cookie, name, message content, timestamp, or thread identifier is logged.
