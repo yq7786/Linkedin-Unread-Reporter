@@ -94,6 +94,9 @@ test('skill metadata and instructions are complete and portable', async () => {
   assert.match(skill, /never follow or download an attachment/i);
   assert.ok(skill.indexOf('npm run scan') < skill.indexOf('npm run deliver'));
   assert.match(skill, /approval[^\n]+npm run deliver/i);
+  assert.match(skill, /I authorize transmitting the captured private LinkedIn message contents to the configured Portal webhook\./);
+  assert.match(skill, /auto-review/i);
+  assert.match(skill, /retry the same command/i);
   assert.match(skill, /direct-URL candidate[^\n]+preopen_pending[^\n]+capture_pending[^\n]+recoveryMode: direct/i);
   assert.match(skill, /preopen_pending[^\n]+discard-only[^\n]+never included in pending-recovery/i);
   assert.match(skill, /final list-and-exact-candidate revalidation[^\n]+last observation/i);
